@@ -263,8 +263,21 @@ There are no critical warnings.
 | `acia6551` | 299 | 1 | 0 |
 | `reu` | 360 | 0 | 0 |
 
+**Measured without UltiSID** (`g_stereo_sid => false` in `u2p_nios2_solo.vhd`, everything
+else unchanged):
+
+| | Baseline | No SID | Free after |
+|---|---|---|---|
+| Logic elements | 21,848 | 20,302 (91 %) | **2,018** |
+| M9K | 56 | 43 | **23** |
+| 9-bit multipliers | 16 | 6 | 126 |
+| Worst setup slack | 0.328 ns | 0.499 ns | — |
+
+There are no critical warnings. The saving is 1,546 LEs, less than the 2,096 the
+per-entity report attributes to SID, because the fitter packs logic differently.
+
 **Conclusion:** IDE64 (~450–900 LEs, 1 M9K) does **not** fit as-is. With UltiSID removed,
-about 2,568 LEs and 23 M9K are free, which is plenty. Run timing again after adding
+2,018 LEs and 23 M9K are free (measured), which is plenty. Run timing again after adding
 IDE64; the setup margin is small.
 
 **Decision (user): the UltiSID emulation may be removed for IDE64 builds.**

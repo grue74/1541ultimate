@@ -240,6 +240,33 @@ ROM offset = `bank * $4000 + (addr & $3FFF)`.
 | DS1302 + FT245 stub | 30–150 | 0 |
 | **Total** | **~450–900 (2–4 % of the device)** | **1** |
 
+**Measured baseline (2026-11-10).** Unmodified `u2plus_run`, Quartus 18.1 Lite, built
+with `build_u2plus_fpga.sh` from the user's own terminal (the sandboxed session can't run
+Quartus's IP generation):
+
+| | Used | Free |
+|---|---|---|
+| Logic elements | 21,848 / 22,320 (**98 %**) | **472** |
+| M9K | 56 / 66 | 10 |
+| 9-bit multipliers | 16 / 132 | 116 |
+| Pins | 143 / 154 | 11 |
+| Worst setup slack | 0.328 ns (DDR2 PHY `pll1 clk[2]`) | — |
+
+There are no critical warnings.
+
+| Block (fitter, per entity) | LEs | M9K | 9-bit mult |
+|---|---|---|---|
+| `sid_peripheral` (UltiSID) | 2,096 | 13 | 10 |
+| `sampler2` | 2,135 | 3 | 2 |
+| `mm_drive` × 2 (second drive = `g_dual_drive`) | 3,337 + 3,344 | 2 + 2 | 0 |
+| `all_carts_v5` (all existing carts) | 573 | 2 | 0 |
+| `acia6551` | 299 | 1 | 0 |
+| `reu` | 360 | 0 | 0 |
+
+**Conclusion:** IDE64 (~450–900 LEs, 1 M9K) does **not** fit as-is. With UltiSID removed,
+about 2,568 LEs and 23 M9K are free, which is plenty. Run timing again after adding
+IDE64; the setup margin is small.
+
 **Decision (user): the UltiSID emulation may be removed for IDE64 builds.**
 - Set `g_stereo_sid => false` in `u2p_nios2_solo.vhd`. Through `ultimate_logic_32` that
   sets `g_implement_sid = false` in `slot_server_v4`, which swaps `sid_peripheral` (16

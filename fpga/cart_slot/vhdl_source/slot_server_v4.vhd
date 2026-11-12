@@ -36,6 +36,7 @@ generic (
     g_sampler_16bit : boolean := true;
     g_acia          : boolean := false;
     g_eeprom        : boolean := true;
+    g_ide64         : boolean := false;
     g_implement_sid : boolean := true;
     g_sid_voices    : natural := 3;
     g_8voices       : boolean := false;
@@ -243,6 +244,7 @@ architecture structural of slot_server_v4 is
     signal serve_rom       : std_logic := '0'; -- ROML or ROMH
     signal serve_io1       : std_logic := '0'; -- IO1n
     signal serve_io2       : std_logic := '0'; -- IO2n
+    signal serve_ultimax   : std_logic := '0'; -- IDE64: ultimax 1000-7FFF / A000-BFFF
     signal allow_write     : std_logic := '0';
 
     -- timing measurement
@@ -630,6 +632,7 @@ begin
         serve_rom       => serve_rom, -- ROML or ROMH
         serve_io1       => serve_io1, -- IO1n
         serve_io2       => serve_io2, -- IO2n
+        serve_ultimax   => serve_ultimax,
         allow_write     => allow_write,
         clear_inhibit   => clear_inhibit,
 
@@ -758,6 +761,7 @@ begin
     generic map (
         g_register_addr => g_register_addr,
         g_eeprom        => g_eeprom,
+        g_ide64         => g_ide64,
         g_kernal_base   => g_kernal_base,
         g_georam_base   => g_ram_base_reu,
         g_max_cart_bits => g_max_cart_bits,
@@ -795,6 +799,7 @@ begin
         serve_rom       => serve_rom, -- ROML or ROMH
         serve_io1       => serve_io1, -- IO1n
         serve_io2       => serve_io2, -- IO2n
+        serve_ultimax   => serve_ultimax,
         allow_write     => allow_write,
         kernal_area     => kernal_area,
         kernal_enable   => control.kernal_enable,

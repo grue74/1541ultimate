@@ -10,6 +10,7 @@ entity all_carts_v5 is
 generic (
     g_register_addr : boolean := false;
     g_eeprom        : boolean := true;
+    g_ide64         : boolean := false;
     g_max_cart_bits : natural := 20;
     g_kernal_base   : std_logic_vector(27 downto 0) := X"0EC8000"; -- multiple of 32K
     g_rom_base      : std_logic_vector(27 downto 0) := X"0F00000"; -- multiple of 1M
@@ -49,6 +50,7 @@ port (
     serve_rom       : out std_logic; -- ROML or ROMH
     serve_io1       : out std_logic; -- IO1n
     serve_io2       : out std_logic; -- IO2n
+    serve_ultimax   : out std_logic := '0'; -- serve 1000-7FFF and A000-BFFF in ultimax (PHI2 only)
     allow_write     : out std_logic;
 
     mem_req         : in  std_logic; -- if '1', the address shouldn't change
@@ -75,6 +77,12 @@ architecture gideon of all_carts_v5 is
     signal ocean_off    : std_logic; -- dedicated cartridge-off flag for c_ocean_16K (COMAL 80), kept out of the shared mode_bits mux since that net is already read by ~15 other cart types
     signal ef_write     : std_logic := '0';
     signal georam_bank  : std_logic_vector(15 downto 0);
+
+    -- IDE64 (dedicated registers; kept out of the shared mode_bits mux)
+    signal ide_cfg      : std_logic_vector(1 downto 0) := "00"; -- 0=8K, 1=16K, 2=off, 3=ultimax
+    signal ide_kill     : std_logic := '0'; -- $DEFB bit 0: ROM window, RTC and config writes disabled until reset
+    signal ide_ce       : std_logic := '0'; -- $DEFB bit 1: DS1302 CE line
+    signal ide_bus      : std_logic_vector(15 downto 0) := (others => '0'); -- IDE bus latch (no drive attached)
     
     signal freeze_act_d : std_logic;
     signal cart_en      : std_logic;
@@ -115,6 +123,7 @@ architecture gideon of all_carts_v5 is
     -- Simple bankers with RAM
     constant c_pagefox      : std_logic_vector(4 downto 0) := "10000";
     constant c_easy_flash   : std_logic_vector(4 downto 0) := "10001";
+    constant c_ide64        : std_logic_vector(4 downto 0) := "10010"; -- variant: 1 = V4.1, 2 = V4.2
 
     -- Freezers
     constant c_fc           : std_logic_vector(4 downto 0) := "11000";
@@ -197,6 +206,9 @@ begin
                 ee_clk       <= '0';
                 ee_sel       <= '0';
                 ee_wdata     <= '0';
+                ide_cfg      <= "00"; -- 8K mode, bank 0
+                ide_kill     <= '0';
+                ide_ce       <= '0';
             end if;
                             
             -- Default, everything is off.
@@ -205,6 +217,7 @@ begin
             serve_io1 <= '0';
             serve_io2 <= '0';
             serve_vic <= '0';
+            serve_ultimax <= '0';
             irq_n     <= '1';
             nmi_n     <= '1';
             game_n    <= '1';
@@ -480,6 +493,50 @@ begin
                 serve_io2 <= '1'; -- RAM
                 rom_mode  <= "01"; -- 16K banks
 
+            when c_ide64 =>
+                if g_ide64 then
+                    -- IDE bus latch. Placeholder for the ATA block: with no drive attached,
+                    -- reads return what was last put on the bus (as VICE does).
+                    if io_write='1' and io_addr(8 downto 4) = "00010" then -- DE20-DE2F
+                        ide_bus(7 downto 0) <= io_wdata;
+                    end if;
+                    if io_write='1' and io_addr(8 downto 0) = "000110001" then -- DE31: high byte of the next 16-bit write
+                        ide_bus(15 downto 8) <= io_wdata;
+                    end if;
+
+                    -- ROM window registers DE60-DEFF; ignored once killed
+                    if io_write='1' and io_addr(8)='0' and ide_kill='0' then
+                        if io_addr(7 downto 5) = "011" and (variant(1)='1' or io_addr(4 downto 3) = "00") then
+                            bank_bits(18 downto 14) <= io_addr(4 downto 0); -- V4.1: DE60-DE67, V4.2: DE60-DE7F
+                        end if;
+                        if io_addr(7 downto 0) = X"FB" then -- kill port
+                            ide_ce <= io_wdata(1);
+                            if io_wdata(0)='1' then
+                                ide_kill <= '1';
+                                ide_cfg  <= "10"; -- off
+                            end if;
+                        end if;
+                        if io_addr(7 downto 2) = "111111" then -- DEFC-DEFF: cfg = (addr ^ 1) & 3
+                            ide_cfg <= io_addr(1) & not io_addr(0);
+                        end if;
+                    end if;
+
+                    -- The modes apply to the CPU only: in PHI1 the VIC sees 8K mode (= RAM).
+                    exrom_n <= ide_cfg(1);
+                    if phi2='1' then
+                        game_n <= not ide_cfg(0);
+                    end if;
+                    serve_rom <= '1';
+                    -- Serve the ROM mirror at DE60-DEFF only; the other IO1 addresses are registers or open bus.
+                    if slot_addr(7)='1' or slot_addr(6 downto 5) = "11" then
+                        serve_io1 <= not ide_kill;
+                    end if;
+                    if ide_cfg = "11" then
+                        serve_ultimax <= '1';
+                    end if;
+                    rom_mode  <= "01"; -- 16K banks
+                end if;
+
             -- COMMON FREEZERS
             when c_fc3 =>
                 if io_write='1' and io_addr(8 downto 0) = "111111111" and cart_en='1' then -- DFFF
@@ -681,7 +738,7 @@ begin
     end process;
 
     -- Determine if RAM is mapped, and its address (max 64K)
-    process(cart_logic_d, variant, mode_bits, ram_bank, slot_addr, do_io2, ef_write)
+    process(cart_logic_d, variant, mode_bits, ram_bank, slot_addr, do_io2, ef_write, ide_cfg)
     begin
         -- Default
         ram_addr <= g_ram_base;
@@ -760,6 +817,15 @@ begin
 		end if;
             end if;
 
+        when c_ide64 =>
+            -- Ultimax: 32K RAM at 1000-7FFF (offset = addr & 7FFF)
+            if g_ide64 and ide_cfg = "11" and slot_addr(15)='0' and slot_addr(14 downto 12) /= "000" then
+                ram_addr(15) <= '0';
+                ram_addr(14 downto 0) <= slot_addr(14 downto 0);
+                addr_map <= RAM;
+                allow_write <= '1';
+            end if;
+
         when others =>
             null;
         end case;
@@ -797,7 +863,7 @@ begin
 --    
 --    slot_resp.reg_output <= '1' when (slot_addr(8 downto 1)="00000000") and (cart_logic_d = c_action) and (variant(0)='1') else '0';
 
-    process(bank_bits, mode_bits, allow_bank, cart_logic_d, variant, slot_addr, ee_rdata)
+    process(bank_bits, mode_bits, allow_bank, cart_logic_d, variant, slot_addr, ee_rdata, ide_cfg, ide_bus)
     begin
         slot_resp <= c_slot_resp_init;
         
@@ -819,6 +885,29 @@ begin
             if g_eeprom then
                 slot_resp.data(7) <= ee_rdata;
                 if slot_addr(8) = '0' and variant(1 downto 0) = "10" then -- gmod2 variant, reading from DExx
+                    slot_resp.reg_output <= '1';
+                end if;
+            end if;
+
+        when c_ide64 =>
+            if g_ide64 and slot_addr(8)='0' then -- DExx
+                if slot_addr(7 downto 4) = X"2" then -- DE20-DE2F: IDE bus (no drive: last bus value)
+                    slot_resp.data <= ide_bus(7 downto 0);
+                    slot_resp.reg_output <= '1';
+                elsif slot_addr(7 downto 0) = X"31" then -- high byte of the last 16-bit read
+                    slot_resp.data <= ide_bus(15 downto 8);
+                    slot_resp.reg_output <= '1';
+                elsif slot_addr(7 downto 0) = X"32" then -- ID | bank << 2 | ((cfg & 1) ^ 1) << 1 | cfg >> 1
+                    if variant(1)='1' then -- V4.2: ID $80, 5-bit bank
+                        slot_resp.data(7 downto 2) <= '1' & bank_bits(18 downto 14);
+                    else                   -- V4.1: ID $20, 3-bit bank
+                        slot_resp.data(7 downto 2) <= "001" & bank_bits(16 downto 14);
+                    end if;
+                    slot_resp.data(1) <= not ide_cfg(0);
+                    slot_resp.data(0) <= ide_cfg(1);
+                    slot_resp.reg_output <= '1';
+                elsif slot_addr(7 downto 0) = X"5E" then -- FT245 status: no RX data, TX full (no link)
+                    slot_resp.data <= X"C0";
                     slot_resp.reg_output <= '1';
                 end if;
             end if;

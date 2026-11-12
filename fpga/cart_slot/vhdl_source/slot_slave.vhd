@@ -54,6 +54,7 @@ port (
     serve_rom       : in  std_logic := '0'; -- ROML or ROMH
     serve_io1       : in  std_logic := '0'; -- IO1n
     serve_io2       : in  std_logic := '0'; -- IO2n
+    serve_ultimax   : in  std_logic := '0'; -- 1000-7FFF and A000-BFFF in ultimax mode, CPU reads only (no PLA strobe there)
     allow_write     : in  std_logic := '0';
     measure         : in  std_logic := '0'; -- Timing measurement mode
     measure_data    : in  std_logic_vector(7 downto 0) := X"55";
@@ -86,6 +87,7 @@ architecture gideon of slot_slave is
     signal io_write_cond: std_logic;
     signal late_write_cond  : std_logic;
     signal ultimax      : std_logic;
+    signal ultimax_area : std_logic;
     signal mem_wdata_i  : std_logic_vector(7 downto 0);
     signal kernal_probe_i   : std_logic;
     signal kernal_area_i    : std_logic;
@@ -253,7 +255,12 @@ begin
     addr_is_io <= (ADDRESS(15 downto 9)="1101111"); -- DE/DF
     addr_is_kernal <= '1' when (ADDRESS(15 downto 13)="111") else '0';
 
-    process(RWn, PHI2, ADDRESS, addr_is_io, ROMLn, ROMHn, serve_128, serve_rom, serve_io1, serve_io2, ultimax, kernal_enable, BA)
+    -- CPU read in an ultimax hole that the cartridge maps itself (the C64 doesn't drive the bus there)
+    ultimax_area <= '1' when serve_ultimax='1' and PHI2='1' and RWn='1' and
+                             ((ADDRESS(15)='0' and ADDRESS(14 downto 12)/="000") or ADDRESS(15 downto 13)="101")
+                    else '0';
+
+    process(RWn, PHI2, ADDRESS, addr_is_io, ROMLn, ROMHn, serve_128, serve_rom, serve_io1, serve_io2, ultimax, kernal_enable, BA, ultimax_area)
     begin
         servicable <= '0';
         if RWn='1' or PHI2 = '0' then
@@ -272,11 +279,14 @@ begin
             if ADDRESS(15 downto 13)="111" and (kernal_enable='1') and (BA='1') then
                 servicable <= '1';
             end if;
+            if ultimax_area='1' then
+                servicable <= '1';
+            end if;
         end if;
     end process;
 
     process(RWn, PHI2, IO1n, IO2n, ROMLn, ROMHn, kernal_read, kernal_ready, data_mux, measure, measure_data,
-            mem_data_0, mem_data_1, dav, slot_resp, serve_io1, serve_io2)
+            mem_data_0, mem_data_1, dav, slot_resp, serve_io1, serve_io2, ultimax_area)
     begin
         DATA_tri <= '0';
         DATA_out <= X"FF";
@@ -309,6 +319,10 @@ begin
                 DATA_out <= measure_data;
 
             elsif (ROMLn='0' or ROMHn='0') and dav='1' then -- ROM reads
+                DATA_tri <= '1';
+                DATA_out <= mem_data_0;
+
+            elsif ultimax_area='1' and dav='1' then -- cartridge-decoded ultimax area
                 DATA_tri <= '1';
                 DATA_out <= mem_data_0;
             end if;

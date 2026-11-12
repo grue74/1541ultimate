@@ -42,6 +42,7 @@ generic (
     g_eeprom        : boolean := true;
     g_command_intf  : boolean := true;
     g_acia          : boolean := false;
+    g_ide64         : boolean := false;
     g_stereo_sid    : boolean := true;
     g_8voices       : boolean := true;
     g_ram_expansion : boolean := true;
@@ -305,7 +306,7 @@ architecture logic of ultimate_logic_32 is
         cap(17) := to_std(g_stereo_sid);
         cap(18) := to_std(g_command_intf);
         cap(19) := to_std(g_wifi_uart);
-        cap(20) := '0';
+        cap(20) := to_std(g_ide64);
         cap(21) := to_std(g_sampler);
         cap(22) := to_std(g_eeprom); 
         cap(23) := to_std(g_usb_host2);
@@ -862,6 +863,7 @@ begin
             g_command_intf  => g_command_intf,
             g_acia          => g_acia,
             g_eeprom        => g_eeprom,
+            g_ide64         => g_ide64,
             g_sampler       => g_sampler,
             g_sampler_voices=> g_sampler_voices,
             g_sampler_16bit => g_sampler_16bit,

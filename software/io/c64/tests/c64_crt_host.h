@@ -77,6 +77,7 @@ public:
     void fclose(File *f) { delete f; }
 };
 
+#define CAPAB_IDE64  0x00100000
 #define CAPAB_EEPROM 0x00400000
 extern uint32_t host_fpga_capabilities;
 extern uint32_t host_cart_max_rom;

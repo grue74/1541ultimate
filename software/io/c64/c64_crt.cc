@@ -46,7 +46,7 @@ const struct C64_CRT::t_cart C64_CRT::c_recognized_c64_carts[] = {
     { 36, 0xFF, CART_RETRO,     "Retro Replay" }, // max 8 banks of 8K
     { 37, 0xFF, CART_NOT_IMPL,  "MMC64" },
     { 38, 0xFF, CART_NOT_IMPL,  "MMC Replay" },
-    { 39, 0xFF, CART_NOT_IMPL,  "IDE64" },
+    { 39, 0xFF, CART_IDE64,     "IDE64" }, // max 32 banks of 16K
     { 40, 0xFF, CART_NOT_IMPL,  "Super Snapshot V4" },
     { 41, 0xFF, CART_NOT_IMPL,  "IEEE 488" },
     { 42, 0xFF, CART_NOT_IMPL,  "Game Killer" },
@@ -213,6 +213,12 @@ SubsysResultCode_e C64_CRT::check_header(File *f, cart_def *def)
             if (local_type == CART_GMOD2) {
                 if (!(getFpgaCapabilities() & CAPAB_EEPROM)) {
                     printf("GMOD2 EEPROM Not implemented.\n", cart_list->cart_name);
+                    return SSRET_NOT_IMPLEMENTED;
+                }
+            }
+            if (local_type == CART_IDE64) {
+                if (!(getFpgaCapabilities() & CAPAB_IDE64)) {
+                    printf("IDE64 not in this FPGA image.\n");
                     return SSRET_NOT_IMPLEMENTED;
                 }
             }
@@ -452,6 +458,11 @@ SubsysResultCode_e C64_CRT::read_crt(File *file, cart_def *def)
         return retval;
     }
 
+    if ((local_type == CART_IDE64) && is_ide64_v3()) {
+        printf("IDE64 V3 ROM - Not implemented\n");
+        return SSRET_NOT_IMPLEMENTED;
+    }
+
     patch_easyflash_eapi();
     auto_mirror();
     regenerate_easyflash_chunks();
@@ -612,6 +623,11 @@ void C64_CRT::configure_cart(cart_def *def)
             cart_type = CART_TYPE_MEGABYTER | VARIANT_1;
             prohibit = CART_PROHIBIT_DEXX;
             break;
+        case CART_IDE64:
+            // V4.1 has 8 banks of 16K, V4.2 has 32. IDE64 owns all of IO1.
+            cart_type = CART_TYPE_IDE64 | ((highest_bank > 7) ? VARIANT_2 : VARIANT_1);
+            prohibit = CART_PROHIBIT_DEXX;
+            break;
         case CART_GMOD2:
             prohibit = CART_PROHIBIT_DEXX;
             cart_type = CART_TYPE_GMOD2;
@@ -754,6 +770,25 @@ SubsysResultCode_e C64_CRT::save_crt(File *fo)
     } else {
         return SSRET_DISK_ERROR;
     }
+}
+
+// IDEDOS for V3 banks with STA $DE32-$DE35, V4 with STA $DE60-$DE7F. Like VICE
+// (ide64_common_attach), the first such store in the $DE60-$DEFF ROM window of
+// bank 0 decides.
+bool C64_CRT :: is_ide64_v3(void)
+{
+    for (int i = 0x1E60; i < 0x1EFD; i++) {
+        if ((cart_memory[i] == 0x8D) && (cart_memory[i + 2] == 0xDE)) {
+            uint8_t lo = cart_memory[i + 1];
+            if (((lo - 2) & 0xFC) == 0x30) {
+                return true;
+            }
+            if ((lo & 0xF8) == 0x60) {
+                return false;
+            }
+        }
+    }
+    return false;
 }
 
 void C64_CRT :: find_eeprom(void)

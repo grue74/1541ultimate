@@ -39,6 +39,7 @@ typedef enum {
     CART_BLACKBOX9,
     CART_MEGABYTER,
     CART_TWOMEGABYTER,
+    CART_IDE64,
     CART_C128_STD,
     CART_C128_STD_IO,
 } e_known_cart;
@@ -97,6 +98,7 @@ class C64_CRT
     SubsysResultCode_e read_crt(File *file, cart_def *def);
     void configure_cart(cart_def *def);
     void find_eeprom(void);
+    bool is_ide64_v3(void);
     void auto_mirror(void);
 public:
     static SubsysResultCode_e load_crt(const char *path, const char *filename, cart_def *def, uint8_t *mem);

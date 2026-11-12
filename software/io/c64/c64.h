@@ -142,6 +142,7 @@
 
 #define CART_TYPE_PAGEFOX     0x10
 #define CART_TYPE_EASY_FLASH  0x11 // ?
+#define CART_TYPE_IDE64       0x12 // 1: V4.1, 2: V4.2 (FPGA built with g_ide64)
 
 #define CART_TYPE_FINAL12     0x18
 #define CART_TYPE_FC3         0x19 // 0: 64K, 1: 256K

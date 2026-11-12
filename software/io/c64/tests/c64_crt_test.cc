@@ -11,7 +11,7 @@
 #include "c64_crt.h"
 
 uint8_t _eapi_65_start[768];
-uint32_t host_fpga_capabilities = CAPAB_EEPROM;
+uint32_t host_fpga_capabilities = CAPAB_EEPROM | CAPAB_IDE64;
 uint32_t host_cart_max_rom = 0;
 
 static const uint32_t K = 1024;
@@ -183,6 +183,9 @@ static void test_cartridge_types(void)
         { "COMAL 80 grey, 128K",     Crt(21).header(0, 0, 1).banks(8, 0x8000, 0x4000),    CART_TYPE_OCEAN_16K | VARIANT_2, CART_PROHIBIT_DEXX, 0 },
         { "EasyFlash",               Crt(32).header(1, 0, 0).banks(SMALL, 0x8000, 0x2000), CART_TYPE_EASY_FLASH,     CART_PROHIBIT_IO, CART_UCI_DE1C },
         { "EasyFlash, subtype 1",    Crt(32).header(1, 0, 1).banks(SMALL, 0x8000, 0x2000), CART_TYPE_EASY_FLASH,     CART_PROHIBIT_ALL_BUT_REU, CART_UCI_DE1C },
+        { "IDE64 V4.1, 128K",        Crt(39).banks(8, 0x8000, 0x4000),                    CART_TYPE_IDE64 | VARIANT_1, CART_PROHIBIT_DEXX, 0 },
+        { "IDE64 V4.1, 64K",         Crt(39).banks(4, 0x8000, 0x4000),                    CART_TYPE_IDE64 | VARIANT_1, CART_PROHIBIT_DEXX, 0 },
+        { "IDE64 V4.2, 512K",        Crt(39).banks(32, 0x8000, 0x4000),                   CART_TYPE_IDE64 | VARIANT_2, CART_PROHIBIT_DEXX, 0 },
         { "Retro Replay",            Crt(36).banks(8, 0x8000, 0x2000),                    CART_TYPE_RETRO,           CART_PROHIBIT_DEXX, 0 },
         { "EXOS",                    Crt(44).header(1, 0, 0).chip(0, 0xE000, 0x2000),     CART_TYPE_NONE,            0, CART_KERNAL },
         { "Pagefox",                 Crt(53).banks(SMALL, 0x8000, 0x4000),                CART_TYPE_PAGEFOX,         0, 0 },
@@ -211,7 +214,7 @@ static void test_cartridge_types(void)
 // CRT types the firmware does not emulate, and files that are not CRT images.
 static void test_refused(void)
 {
-    const uint16_t accepted[] = { 0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 13, 15, 18, 19, 20, 21, 32, 36, 44, 53, 54, 60, 64, 65, 66, 71, 86, 87 };
+    const uint16_t accepted[] = { 0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 13, 15, 18, 19, 20, 21, 32, 36, 39, 44, 53, 54, 60, 64, 65, 66, 71, 86, 87 };
     for (uint16_t hw = 0; hw < 100; hw++) {
         if (std::find(std::begin(accepted), std::end(accepted), hw) != std::end(accepted)) {
             continue;
@@ -226,6 +229,27 @@ static void test_refused(void)
     r = load(Crt(60).banks(4, 0x8000, 0x2000), 4 * MB);
     CHECK(r.rc == SSRET_NOT_IMPLEMENTED, "GMod2 without EEPROM support: load returned %d, want not implemented", r.rc);
     host_fpga_capabilities = CAPAB_EEPROM;
+    r = load(Crt(39).banks(8, 0x8000, 0x4000), 4 * MB);
+    CHECK(r.rc == SSRET_NOT_IMPLEMENTED, "IDE64 without FPGA support: load returned %d, want not implemented", r.rc);
+    host_fpga_capabilities = CAPAB_EEPROM | CAPAB_IDE64;
+
+    // IDE64: the first STA $DExx bank switch in the $DE60-$DEFF window of bank 0
+    // tells V3 ($DE32-$DE35) from V4 ($DE60-$DE7F). V3 is not emulated.
+    {
+        Crt v3(39);
+        v3.banks(4, 0x8000, 0x4000);
+        const uint8_t sta_de32[3] = { 0x8D, 0x32, 0xDE }, sta_de61[3] = { 0x8D, 0x61, 0xDE };
+        memcpy(&v3.chips[0].data[0x1E80], sta_de32, 3);
+        r = load(v3, 4 * MB);
+        CHECK(r.rc == SSRET_NOT_IMPLEMENTED, "IDE64 V3 ROM: load returned %d, want not implemented", r.rc);
+
+        Crt v4(39);
+        v4.banks(8, 0x8000, 0x4000);
+        memcpy(&v4.chips[0].data[0x1E70], sta_de61, 3);
+        memcpy(&v4.chips[0].data[0x1E80], sta_de32, 3); // after the V4 store: not looked at
+        r = load(v4, 4 * MB);
+        CHECK(r.rc == SSRET_OK && r.type == (CART_TYPE_IDE64 | VARIANT_1), "IDE64 V4 ROM: load returned %d, type $%02X", r.rc, r.type);
+    }
 
     Crt bad(0);
     bad.banks(1, 0x8000, 0x2000);
@@ -260,7 +284,7 @@ static void test_packets(void)
 // B * 32K for C128 images. Chips shorter than 8K repeat to 8K.
 static void test_chip_placement(void)
 {
-    const uint16_t types[] = { 0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 13, 15, 19, 20, 21, 32, 36, 44, 53, 60, 64, 65, 66, 71, 86, 87 };
+    const uint16_t types[] = { 0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 13, 15, 19, 20, 21, 32, 36, 39, 44, 53, 60, 64, 65, 66, 71, 86, 87 };
     for (uint16_t hw : types) {
         Crt crt(hw);
         for (int b = 0; b < 4; b++) {

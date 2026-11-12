@@ -1,7 +1,7 @@
 # IDE64 cartridge emulation: findings and plan
 
 Status: feasibility checked and the hardware spec extracted from VICE (2026-11-10).
-Nothing implemented yet.
+Phase 1 implemented, simulated and built for U2+; not yet run on hardware (2026-11-12).
 
 Reference implementation: VICE, `E:\GitHub\svn-mirror\vice`
 - `src/c64/cart/ide64.c`: cart logic, IO map, banking, RTC, CRT loading
@@ -492,7 +492,10 @@ the PC, and it's no use to the U64E-II. The ACIA/modem code is not touched.
     preallocate them at creation.
   - **Possible later option:** a raw-partition backend is the same `BlockDevice`
     interface, so it can still be added.
-- [ ] RTC: real clock from the Ultimate's RTC, plus where the 31 bytes of RTC RAM are stored.
+- [x] RTC: real clock from the Ultimate's RTC. The 31 bytes of RTC RAM (IDEDOS setup)
+      are stored in a sidecar file next to the mounted image (`<image>.rtc`), so the
+      settings follow the disk image. Writes are debounced (save a few seconds after the
+      last change, and on reset/detach). (Decided 2026-11-11.)
 - [ ] Ultimax `$C000-$CFFF`: open bus (VICE slow path) or RAM (VICE mmu_translate).
 
 ## 4. Plan
@@ -503,27 +506,67 @@ the PC, and it's no use to the U64E-II. The ACIA/modem code is not touched.
 - [ ] For U64E-II: ask how the U64E2 bitstream is built (Vivado project, version).
 
 ### Phase 1: VHDL, banking and modes only (no disk)
-- [ ] Add a `g_ide64 : boolean := false` generic to `all_carts_v5` and `slot_server_v4`.
-      Pass it as true only for U2+ and U64; leave it false for U2+L.
-- [ ] U2+ IDE64 build: `g_ide64 => true`, `g_stereo_sid => false` in `u2p_nios2_solo.vhd`
-      (keep a separate top or a generic, so the stock U2+ image keeps UltiSID).
-- [ ] Add `constant c_ide64 := "10010"` and a `when c_ide64` branch:
-  - `$DEFB-$DEFF` mode and kill handling, and `$DE60-$DE7F` bank select
-  - game/exrom per the mode table, applied only while `phi2='1'` (CPU-only modes,
-    see §2), `serve_vic='0'`
-  - `rom_mode="01"`, `serve_rom`, and `serve_io1` gated to the claimed ranges
-- [ ] `slot_resp` process: the `$DE32` status read.
-- [ ] `addr_map` process:
-  - `$DE60-$DEFF` reads → ROM `bank * $4000 + $1E00 + low byte`
-  - ultimax `$1000-$7FFF` → RAM with `allow_write`
-- [ ] `slot_slave`: serve ultimax `$1000-$7FFF` and `$A000-$BFFF` reads (§1). Pass the
-      new `serve_*` signal through `slot_server_v4`.
-- [ ] Software:
-  - add `CART_TYPE_IDE64 0x12` and map CRT type 39 to it, with variants from the chip count
-  - load the chips at their bank offsets
-  - add a menu entry for a raw `.bin` ROM
+Status (2026-11-12): implemented, simulated, host-tested and built for U2+ (fits, timing
+met); **not yet run on hardware**. Nothing is committed yet.
+- [x] `g_ide64 : boolean := false` generic on `all_carts_v5`, `slot_server_v4` and
+      `ultimate_logic_32`; capability bit 20 (`CAPAB_IDE64`, the old unused
+      `CAPAB_OVERLAY` bit) reports it to the firmware.
+- [x] U2+ IDE64 build: `u2p_nios2_solo.vhd` has `g_ide64 : boolean := true` and
+      `g_stereo_sid => not g_ide64`. **Local only:** the stock image must keep
+      `g_ide64 => false` (flip the default before any upstream PR).
+- [x] `constant c_ide64 := "10010"` and its `when c_ide64` branch:
+  - `$DEFB-$DEFF` mode and kill handling, `$DE60-$DE67` (V4.1) / `$DE60-$DE7F` (V4.2)
+    bank select into `bank_bits(18 downto 14)`
+  - GAME driven only while `phi2='1'`, EXROM from cfg, `serve_vic='0'`
+  - `rom_mode="01"`, `serve_rom`, `serve_io1` only for `$DE60-$DEFF` (and not when killed)
+  - placeholder IDE bus latch at `$DE20-$DE2F`/`$DE31` (no drive: reads return the last
+    bus value, as in VICE); `$DE5E` FT245 status reads `$C0`
+- [x] `slot_resp`: `$DE32` status (ID `$20`/`$80`, bank, cfg), `$DE20-$DE2F`, `$DE31`, `$DE5E`.
+- [x] `addr_map`: ultimax `$1000-$7FFF` → cart RAM (`addr & $7FFF`) with `allow_write`.
+      The `$DE60-$DEFF` ROM mirror comes from the normal ROM path.
+- [x] `slot_slave`: new `serve_ultimax` input; serves CPU reads (PHI2, RWn=1) of
+      `$1000-$7FFF` and `$A000-$BFFF` from `mem_data_0`. Passed through `slot_server_v4`.
+      Other carts never assert it.
+- [x] Testbench `fpga/cart_slot/vhdl_sim/tb_ide64.vhd` (`slot_timing` + `slot_slave` +
+      `all_carts_v5`, PLA model, memory model): modes and GAME/EXROM per half cycle,
+      banking (V4.1 and V4.2), `$DE32`, ROM window, unclaimed IO1 left open, ultimax RAM
+      read/write and offsets, ultimax `$A000`/`$E000`, kill and reset. **Passes** in
+      ModelSim ASE 18.1 (`vcom -2008`; compile order: `io_bus_pkg`, `slot_bus_pkg`,
+      `io_dummy`, `fpga/altera/dpram.vhd`, `microwire_eeprom`, `slot_timing`, `slot_slave`,
+      `all_carts_v5`, `tb_ide64`).
+- [x] Software:
+  - `CART_TYPE_IDE64 0x12` in `c64.h`, `CAPAB_IDE64` in `itu.h`
+  - CRT type 39 → `CART_IDE64`: refused when the FPGA lacks `CAPAB_IDE64`; V3 ROMs
+    (VICE's `STA $DE3x` scan of `$1E60-$1EFC`) refused; more than 8 banks → V4.2
+    (`VARIANT_2`), else V4.1 (`VARIANT_1`); `prohibit = CART_PROHIBIT_DEXX`
+  - chips (`$8000`, 16K) land at `bank * $4000` through the existing loader
+  - host tests in `software/io/c64/tests` (types, refusals, V3/V4 detection, placement):
+    560 checks pass. On this machine, build with MSYS2
+    `make CXX=/c/msys64/usr/bin/g++ CXXFLAGS="-std=gnu++14 ..."` (plain `c++14` hides
+    `strcasecmp` on MSYS2).
+- [ ] Raw `.bin` ROM (64K/128K/512K) menu entry: deferred; convert with VICE `cartconv`.
+- [x] Build the U2+ FPGA and firmware (2026-11-12, `build_u2plus.cmd`). Phase 1 costs
+      75 LEs over the no-SID numbers in §2b:
+
+      | | No SID | No SID + IDE64 Phase 1 |
+      |---|---|---|
+      | Logic elements | 20,302 | 20,377 (91 %, 1,943 free) |
+      | Worst setup slack | 0.499 ns | 0.448 ns (DDR2 PHY `pll1 clk[3]`) |
+      | Worst hold slack | — | 0.398 ns (`ref_clock`) |
+
+- [x] Windows packaging: `build_u2plus.cmd [fpga|update]` runs `build_u2plus_fpga.sh` and
+      `build_u2plus_update.sh`. The latter builds `tools/*.exe` with MSYS2 gcc and passes
+      them as make overrides, because Git Bash runs the extensionless Linux ELF
+      `tools/hex2bin` ahead of `hex2bin.exe`.
 - [ ] Milestone: IDEDOS boots and shows its banner. With no drive it should report that
       no device was found.
+- **First hardware checks (not covered by the testbench):**
+  - GAME switching per half cycle: the testbench PLA reacts to GAME with a fixed delay,
+    not to real PHI2 edge timing. If GAME arrives late in PHI2, C64 DRAM may drive
+    `$1000-$7FFF` before the cart does. Put a logic analyzer on GAME vs PHI2 first.
+  - Kernal replacement vs ultimax ROMH at `$E000-$FFFF`: test with kernal replacement
+    off. Then check which one wins in `slot_slave`'s data process, or have the firmware
+    force kernal replacement off while the cart is IDE64.
 
 ### Phase 2: ATA device in the FPGA
 - [ ] New entity `fpga/cart_slot/vhdl_source/ide64_ata.vhd`:
@@ -556,7 +599,8 @@ the PC, and it's no use to the U64E-II. The ACIA/modem code is not touched.
 
 ### Phase 4: RTC, USB stub and polish
 - [ ] DS1302: CE/SCLK/IO in the FPGA as a shift register, or a small state machine.
-      Time comes from the Ultimate's RTC, and the 31 bytes of RAM are persisted.
+      Time comes from the Ultimate's RTC, and the 31 bytes of RAM are persisted to
+      `<image>.rtc` next to the mounted `.hdd`/`.cfa` (debounced writes).
 - [ ] FT245 / PCLink (§2c option A):
   - byte FIFOs at `$DE5D`/`$DE5E` (status `$C0` when idle)
   - a firmware TCP server on port 64245 bridging to the FIFOs
@@ -568,7 +612,7 @@ the PC, and it's no use to the U64E-II. The ACIA/modem code is not touched.
 - [ ] Add e2e tests under `tests/` if the harness supports cart boot checks.
 
 ### FPGA build setup (U2+, local)
-- **Quartus Prime Lite 18.1** at `C:\intelFPGA_lite8.1`, the version the `.qsf` was
+- **Quartus Prime Lite 18.1** at `C:\intelFPGA_lite\18.1`, the version the `.qsf` was
   last saved with. It includes:
   - `quartusin64\quartus_sh.exe`
   - Cyclone IV E device support (EP4CE22F17C8)

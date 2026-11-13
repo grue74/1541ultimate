@@ -151,6 +151,7 @@ Ide64 :: Ide64()
     rtc_changed = 0;
     taskHandle = NULL;
     present_mask = 0;
+    startup_pending = false;
     abort_request = false;
     available = true;
     mutex = xSemaphoreCreateMutex();
@@ -166,6 +167,14 @@ void Ide64 :: init(void)
         rtc_regs[i] = 0;
     }
     rtc_load(IDE64_RTC_FLASH_FILE);
+
+    // With a startup image, drive 0 is there from power-on, like a disk that is
+    // still spinning up: IDEDOS probes the drives long before USB storage is up.
+    // Its first command stays busy until the image is mounted (wait_startup_image).
+    if ((cfg->get_value(CFG_IDE64_MOUNT) != 0) && (cfg->get_string(CFG_IDE64_IMAGE)[0] != 0)) {
+        startup_pending = true;
+        present_mask |= 0x01;
+    }
     install_high_irq(ITU_IRQHIGH_IDE64, Ide64 :: irq, this);
     xTaskCreate(Ide64 :: task, "IDE64", configMINIMAL_STACK_SIZE, this, PRIO_DRIVER, &taskHandle);
     usb_regs[4] = IDE64_USB_FLUSH; // not connected
@@ -196,15 +205,19 @@ void Ide64 :: task(void *a)
 
 void Ide64 :: run(void)
 {
-    bool automount = (cfg->get_value(CFG_IDE64_MOUNT) != 0) && (cfg->get_string(CFG_IDE64_IMAGE)[0] != 0);
     int tries = 0;
 
     for (;;) {
         // Mount the startup image once the medium shows up (USB takes a while)
-        if (automount && !is_mounted() && (tries < 60)) {
-            tries++;
-            if (mount(cfg->get_string(CFG_IDE64_IMAGE), NULL) == FR_OK) {
-                automount = false;
+        if (startup_pending && !is_mounted()) {
+            if (++tries > 60) {
+                xSemaphoreTake(mutex, portMAX_DELAY);
+                startup_pending = false;
+                present_mask &= ~0x01;
+                xSemaphoreGive(mutex);
+                printf("IDE64: startup image %s not found\n", cfg->get_string(CFG_IDE64_IMAGE));
+            } else {
+                mount(cfg->get_string(CFG_IDE64_IMAGE), NULL);
             }
         }
 
@@ -337,8 +350,38 @@ void Ide64 :: set_command_block(uint32_t lba)
     }
 }
 
+// Called with the drive locked, when IDEDOS sends a command before the startup
+// image is mounted. Keeps the drive busy (up to 30 s) while trying to mount it.
+// Returns false if the command must not be completed (reset or abort).
+bool Ide64 :: wait_startup_image(void)
+{
+    for (int i = 0; (i < 60) && startup_pending && !drive.file; i++) {
+        File *f = NULL;
+        bool readonly = false;
+        const char *name = cfg->get_string(CFG_IDE64_IMAGE);
+        if (open_image(name, &f, readonly) == FR_OK) {
+            attach_locked(f, name, readonly);
+            break;
+        }
+        if (regs->events & IDE64_EV_RESET) {
+            return false;
+        }
+        if (abort_request) {
+            complete(ATA_ERR_ABRT);
+            return false;
+        }
+        vTaskDelay(configTICK_RATE_HZ / 2);
+    }
+    return true;
+}
+
 void Ide64 :: execute(uint8_t command)
 {
+    if (!drive.file && startup_pending) {
+        if (!wait_startup_image()) {
+            return;
+        }
+    }
     if (!drive.file) {
         complete(ATA_ERR_ABRT);
         return;
@@ -620,47 +663,63 @@ void Ide64 :: cmd_identify(void)
 /* Mounting                                                          */
 /*********************************************************************/
 // filename may be NULL, then path is the full path name
-FRESULT Ide64 :: mount(const char *path, const char *filename)
+FRESULT Ide64 :: open_image(const char *fullpath, File **f, bool &readonly)
 {
     FileManager *fm = FileManager :: getFileManager();
+    readonly = false;
+    FRESULT fres = fm->fopen(fullpath, FA_READ | FA_WRITE, f);
+    if (fres != FR_OK) {
+        fres = fm->fopen(fullpath, FA_READ, f);
+        readonly = true;
+    }
+    if (fres != FR_OK) {
+        return fres;
+    }
+    if ((*f)->get_size() < 512) {
+        fm->fclose(*f);
+        *f = NULL;
+        return FR_INVALID_OBJECT;
+    }
+    return FR_OK;
+}
+
+// The drive must be locked
+void Ide64 :: attach_locked(File *f, const char *fullpath, bool readonly)
+{
+    detach_locked();
+    drive.file = f;
+    drive.name = fullpath;
+    drive.readonly = readonly;
+    const char *ext = strrchr(fullpath, '.');
+    drive.cf = !(ext && (strcasecmp(ext, ".hdd") == 0));
+    drive.detect_geometry();
+    mstring rtcname(fullpath);
+    rtcname += ".rtc";
+    rtc_load(rtcname.c_str()); // the IDEDOS settings follow the image
+    startup_pending = false;
+    present_mask |= 0x01; // interface 0, master
+    write_present();
+
+    printf("IDE64: mounted %s (%u sectors, CHS %u/%u/%u%s)\n", fullpath, drive.size,
+           drive.cylinders, drive.heads, drive.sectors, readonly ? ", read only" : "");
+}
+
+// filename may be NULL, then path is the full path name
+FRESULT Ide64 :: mount(const char *path, const char *filename)
+{
     File *f = NULL;
     bool readonly = false;
     mstring full(path);
     if (filename) {
         full += filename;
     }
-
-    FRESULT fres = fm->fopen(full.c_str(), FA_READ | FA_WRITE, &f);
-    if (fres != FR_OK) {
-        fres = fm->fopen(full.c_str(), FA_READ, &f);
-        readonly = true;
-    }
+    FRESULT fres = open_image(full.c_str(), &f, readonly);
     if (fres != FR_OK) {
         return fres;
     }
-    if (f->get_size() < 512) {
-        fm->fclose(f);
-        return FR_INVALID_OBJECT;
-    }
-
-    unmount();
-
     lock_drive();
-    drive.file = f;
-    drive.name = full;
-    drive.readonly = readonly;
-    const char *ext = strrchr(full.c_str(), '.');
-    drive.cf = !(ext && (strcasecmp(ext, ".hdd") == 0));
-    drive.detect_geometry();
-    mstring rtcname(full);
-    rtcname += ".rtc";
-    rtc_load(rtcname.c_str()); // the IDEDOS settings follow the image
-    present_mask |= 0x01; // interface 0, master
-    write_present();
+    attach_locked(f, full.c_str(), readonly);
     xSemaphoreGive(mutex);
-
-    printf("IDE64: mounted %s (%u sectors, CHS %u/%u/%u%s)\n", full.c_str(), drive.size,
-           drive.cylinders, drive.heads, drive.sectors, readonly ? ", read only" : "");
     return FR_OK;
 }
 
@@ -879,6 +938,8 @@ void Ide64 :: pclink_serve(int sock)
 {
     uint8_t in[256];
     uint8_t out[256];
+    int out_len = 0;
+    TickType_t out_since = 0;
     int in_len = 0, in_pos = 0;
     int flags = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flags, sizeof(flags));
@@ -890,20 +951,27 @@ void Ide64 :: pclink_serve(int sock)
     for (;;) {
         bool moved = false;
 
-        // C64 -> PC: everything in the TX ring
+        // C64 -> PC: collect bytes and send them in batches, as VICE does (128 bytes,
+        // or a short latency after the first one). One TCP segment per byte runs into
+        // lwIP's segment limit and the PC's delayed ACKs; ideservd gives up after 1 s.
         uint8_t head = usb_regs[2];
         uint8_t tail = usb_regs[3];
         if (head != tail) {
-            int n = 0;
-            while (tail != head) {
-                out[n++] = usb_tx[tail++];
+            if (out_len == 0) {
+                out_since = xTaskGetTickCount();
+            }
+            while ((tail != head) && (out_len < (int)sizeof(out))) {
+                out[out_len++] = usb_tx[tail++];
             }
             usb_regs[3] = tail;
-            if (send(sock, out, n, 0) != n) {
+            moved = true;
+        }
+        if ((out_len >= 128) || ((out_len > 0) && ((xTaskGetTickCount() - out_since) >= 1))) {
+            if (send(sock, out, out_len, 0) != out_len) {
                 reason = "send error";
                 break;
             }
-            moved = true;
+            out_len = 0;
         }
 
         // PC -> C64: as much as fits in the RX ring; the rest waits (TCP flow control).
@@ -963,8 +1031,16 @@ void Ide64 :: set_startup_image(const char *fullpath)
 void Ide64 :: unmount(void)
 {
     lock_drive();
+    startup_pending = false;
     present_mask &= ~0x01;
     write_present();
+    detach_locked();
+    xSemaphoreGive(mutex);
+}
+
+// The drive must be locked
+void Ide64 :: detach_locked(void)
+{
     if (drive.file) {
         drive.file->sync();
         FileManager :: getFileManager()->fclose(drive.file);
@@ -977,5 +1053,4 @@ void Ide64 :: unmount(void)
         }
         rtc_file = IDE64_RTC_FLASH_FILE;
     }
-    xSemaphoreGive(mutex);
 }

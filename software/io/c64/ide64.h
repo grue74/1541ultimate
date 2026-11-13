@@ -101,6 +101,7 @@ class Ide64 : public ConfigurableObject
     SemaphoreHandle_t mutex;
     uint8_t present_mask;
     volatile bool abort_request; // mount/unmount wants the drive
+    bool startup_pending;        // a startup image is configured but not mounted yet
     bool available;
     Ide64Drive drive; // interface 0, master
 
@@ -122,6 +123,11 @@ class Ide64 : public ConfigurableObject
     static void pclink_task(void *a);
     void pclink_run(void);
     void pclink_serve(int sock);
+
+    FRESULT open_image(const char *fullpath, File **f, bool &readonly);
+    void attach_locked(File *f, const char *fullpath, bool readonly);
+    void detach_locked(void);
+    bool wait_startup_image(void);
 
     static void task(void *a);
     static uint8_t irq(void *context);

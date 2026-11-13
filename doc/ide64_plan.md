@@ -656,12 +656,24 @@ Status (2026-11-13): written, builds for U2+; not yet run on hardware.
      The startup mount can come too late for the first boot (USB is slow).
   3. Check: the drive shows up, directory, LOAD, SAVE; large loads for BSY-latency
      timeouts.
-- [ ] Milestone: IDEDOS sees the drive, and a directory listing, a file load and a save work.
+- [x] Milestone: IDEDOS sees the drive; LOAD and SAVE work (user test on C128 + U2+,
+      2026-11-13, after the reset-event fix 08afb2af and a recovery boot to flash it).
+- Recovery, if a runtime image hangs: hold the **middle button** at power-on to boot the
+  write-protected recovery FPGA/application (flash 0), then "Run Update" from a FAT32
+  USB stick. Without a C64, the updater asks "Flash Runtime?" on the debug UART
+  (115200 8N1), not on telnet.
 
 ### Phase 4: RTC, USB stub and polish
-- [ ] DS1302: CE/SCLK/IO in the FPGA as a shift register, or a small state machine.
-      Time comes from the Ultimate's RTC, and the 31 bytes of RAM are persisted to
-      `<image>.rtc` next to the mounted `.hdd`/`.cfa` (debounced writes).
+- [x] DS1302 (92821769, 0a6bbd8f), built for U2+ (20,853 LEs, 46 M9K, timing met);
+      not yet tested on hardware:
+  - `ide64_rtc.vhd`: the serial engine (single/burst, write protect, CE reset) and a
+    64-byte register file at offset `$100` (0-7 clock, 8 trickle, 32-63 RAM); events 3
+    (clock written) and 4 (RAM written). Off when the cart is killed. 10 testbench checks.
+  - Firmware: clock registers set from the Ultimate's RTC twice a second while the cart is
+    active (12/24 h as chosen by the C64, CH respected); a C64 clock write sets the
+    Ultimate's RTC chip. RAM saved 2 s after the last change and on reset to
+    `<image>.rtc` (e.g. `ide.hdd.rtc`), or `/flash/ide64.rtc` with no image mounted;
+    loaded on mount and at startup.
 - [ ] FT245 / PCLink (§2c option A):
   - byte FIFOs at `$DE5D`/`$DE5E` (status `$C0` when idle)
   - a firmware TCP server on port 64245 bridging to the FIFOs

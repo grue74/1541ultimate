@@ -642,6 +642,20 @@ Status (2026-11-13): written, builds for U2+; not yet run on hardware.
 - [ ] A "create new IDE64 image" menu action that preallocates the file at a chosen size.
       IDEDOS's own setup tool can format it as CFS.
 - [ ] Only interface 0 master; slave and interface 1 are wired in the FPGA but not served.
+- [x] Mount/unmount while a command waits for the C64 (e.g. the menu froze the C64 in a
+      multi-sector transfer): the waiting command ends with ABRT so the menu can't hang
+      (b92fe7ee).
+- [x] Capability bit 20: `CAPAB_OVERLAY` kept as an alias of `CAPAB_IDE64`, because the
+      original U2 updaters still test it (955f9ea0). Every current top level has
+      `g_video_overlay => false`, so no shipping FPGA sets the bit.
+- **Hardware test recipe:**
+  1. Make and format an image in VICE first, with the same IDEDOS `.crt`
+     (e.g. `fsutil file createnew ide64.hdd 33554432`, attach as IDE64 HDD, format with
+     IDEDOS setup). A failure on the Ultimate then can't be the image.
+  2. Mount it with "Mount on IDE64", then reset the C64: IDEDOS probes drives at boot.
+     The startup mount can come too late for the first boot (USB is slow).
+  3. Check: the drive shows up, directory, LOAD, SAVE; large loads for BSY-latency
+     timeouts.
 - [ ] Milestone: IDEDOS sees the drive, and a directory listing, a file load and a save work.
 
 ### Phase 4: RTC, USB stub and polish
@@ -784,3 +798,8 @@ Nothing is pushed, and no issue or pull request is opened, until the user says s
 >    project, or tell us how contributors build them (as for the COMAL 80 fix in
 >    `0c0fe7c1`)?
 > 3. Should IDE64 be in the standard images, or in a separate IDE64 build variant?
+> 4. All eight ITU high IRQs are taken. IDE64 shares line 4 with `bling_irq`, which has
+>    no firmware handler. Does the U64 top drive `bling_irq`? Would you prefer a wider
+>    `irq_high`?
+> 5. Capability bit 20 (`CAPAB_OVERLAY`, unused since the overlay was removed) is reused
+>    as `CAPAB_IDE64`. OK?

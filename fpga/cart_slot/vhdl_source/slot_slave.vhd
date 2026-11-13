@@ -96,6 +96,8 @@ architecture gideon of slot_slave is
     signal mem_data_0       : std_logic_vector(7 downto 0) := X"00";
     signal mem_data_1       : std_logic_vector(7 downto 0) := X"00";
     signal data_mux         : std_logic;
+    signal rd_pend          : std_logic := '0'; -- an I/O read that may still be repeated
+    signal rd_addr          : unsigned(15 downto 0) := (others => '0');
 
     type   t_state is (idle, mem_access, wait_end);
                        
@@ -134,13 +136,28 @@ begin
             end if;
 
             slot_req.bus_write <= '0';
+            slot_req.io_read_done <= '0';
             if do_sample_io='1' and PHI2 = '1' then
                 cpu_write  <= not RWn;
 
                 slot_req.bus_write  <= not RWn;
                 slot_req.io_address <= ADDRESS;
-                slot_req.io_ba      <= BA;
                 mem_wdata_i         <= DATA_in;
+
+                -- I/O read completion. While RDY (BA) is low the 6510 repeats a read cycle,
+                -- and the exact cycle in which it completes depends on BA timing. A real
+                -- program never reads the same I/O address in two consecutive cycles (there
+                -- is at least an opcode fetch in between), so a read has completed once a
+                -- cycle with BA high is not that same read. For reads with side effects.
+                if rd_pend = '1' and BA = '1' and not (RWn = '1' and (IO1n = '0' or IO2n = '0') and ADDRESS = rd_addr) then
+                    slot_req.io_read_done    <= '1';
+                    slot_req.io_done_address <= rd_addr;
+                    rd_pend <= '0';
+                end if;
+                if RWn = '1' and (IO1n = '0' or IO2n = '0') then
+                    rd_pend <= '1';
+                    rd_addr <= ADDRESS;
+                end if;
 
                 late_write_cond <= not RWn;
                 io_write_cond <= not RWn and (not IO2n or not IO1n);
@@ -242,6 +259,7 @@ begin
                 io_write_cond   <= '0';
                 late_write_cond <= '0';
                 slot_req.io_address <= (others => '0');
+                rd_pend         <= '0';
                 cpu_write       <= '0';
                 epyx_reset      <= '1';
                 kernal_probe_i  <= '0';

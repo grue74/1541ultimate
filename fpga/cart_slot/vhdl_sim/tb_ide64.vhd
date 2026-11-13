@@ -570,6 +570,15 @@ begin
             cpu_drive <= false;
             ADDRESS   <= X"3FFF"; -- VIC fetch in PHI1
             RWn       <= '1';
+            if rw = '1' then
+                -- the next CPU cycle is never the same read (opcode fetch from RAM)
+                wait until PHI2 = '1';
+                wait for 10 ns;
+                ADDRESS <= X"0810";
+                wait until PHI2 = '0';
+                wait for 10 ns;
+                ADDRESS <= X"3FFF";
+            end if;
         end procedure;
 
         procedure wr(a : unsigned(15 downto 0); d : std_logic_vector(7 downto 0)) is

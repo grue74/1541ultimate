@@ -88,6 +88,8 @@ architecture gideon of ide64_ata is
     -- DS1302
     signal rtc_active   : std_logic;
     signal rtc_strobe   : std_logic;
+    signal rtc_rd_done  : std_logic;
+    signal rtc_wr       : std_logic;
     signal rtc_rbit     : std_logic;
     signal rtc_cpu_en   : std_logic;
     signal rtc_rdata    : std_logic_vector(7 downto 0);
@@ -216,7 +218,9 @@ begin
 
     -- DS1302 at DE5F. Every access is one SCLK pulse; it stops responding when the cart is killed.
     rtc_active <= active and not killed;
-    rtc_strobe <= rtc_active and ((slot_req.io_read and slot_req.io_ba) or slot_req.io_write) when slot_req.io_address(8 downto 0) = "001011111" else '0';
+    rtc_rd_done <= slot_req.io_read_done when slot_req.io_done_address(8 downto 0) = "001011111" else '0';
+    rtc_wr      <= slot_req.io_write when slot_req.io_address(8 downto 0) = "001011111" else '0';
+    rtc_strobe  <= rtc_active and (rtc_rd_done or rtc_wr);
     rtc_cpu_en <= (io_req.read or io_req.write) and sel_rtc;
 
     -- FT245 USB FIFO at DE5D/DE5E (PCLink)
@@ -255,13 +259,13 @@ begin
         ev_time         => rtc_wr_time,
         ev_ram          => rtc_wr_ram );
 
-    -- Reads with side effects only count when they complete: while BA is low the 6510
-    -- is halted and repeats the read cycle (badlines, sprites), up to 3 times.
-    c64_rd_reg <= active and slot_req.io_read and slot_req.io_ba when slot_req.io_address(8 downto 4) = "00010" else '0';
+    -- Reads with side effects act when the read has completed: a halted 6510 (BA low:
+    -- badlines, sprites) repeats the read cycle. See io_read_done in slot_slave.
+    c64_rd_reg <= active and slot_req.io_read_done when slot_req.io_done_address(8 downto 4) = "00010" else '0';
     c64_wr_reg <= active and slot_req.io_write when slot_req.io_address(8 downto 4) = "00010" else '0';
     c64_wr_hi  <= active and slot_req.io_write when slot_req.io_address(8 downto 0) = "000110001" else '0';
 
-    data_rd <= c64_rd_reg and sel_present and xfer and not dir_out and not bsy_eff when slot_req.io_address(3 downto 0) = X"0" else '0';
+    data_rd <= c64_rd_reg and sel_present and xfer and not dir_out and not bsy_eff when slot_req.io_done_address(3 downto 0) = X"0" else '0';
     data_wr <= c64_wr_reg and sel_present and xfer and dir_out and not bsy_eff when slot_req.io_address(3 downto 0) = X"0" else '0';
 
     io_irq <= irq_en and (ev_cmd or ev_buf or ev_reset or ev_rtc_time or ev_rtc_ram);

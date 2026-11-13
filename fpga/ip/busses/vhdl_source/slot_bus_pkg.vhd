@@ -15,8 +15,8 @@ package slot_bus_pkg is
         late_write      : std_logic;
         data            : std_logic_vector(7 downto 0);
         sample_io       : std_logic; -- timing signal, pulses when IO lines and address should be stable
-        io_ba           : std_logic; -- BA during the cycle of io_read: '0' = the CPU is halted (RDY low)
-                                     -- and repeats this read, so it has not completed yet
+        io_read_done    : std_logic;             -- pulse: the I/O read at io_done_address has completed
+        io_done_address : unsigned(15 downto 0); -- (a halted 6510 repeats a read; this fires once)
     end record;
     
     type t_slot_resp is record
@@ -36,7 +36,8 @@ package slot_bus_pkg is
         io_write      => '0',
         late_write    => '0',
         sample_io     => '0',
-        io_ba         => '1',
+        io_read_done  => '0',
+        io_done_address => X"0000",
         data          => X"00" );
      
     constant c_slot_resp_init : t_slot_resp := (

@@ -15,13 +15,19 @@
 #include "filemanager.h"
 #include "init_function.h"
 #include "rtc.h"
+#include "socket.h"
+#include <errno.h>
 
 #define CFG_IDE64_IMAGE  0x01
 #define CFG_IDE64_MOUNT  0x02
+#define CFG_IDE64_PCLINK 0x03
+#define CFG_IDE64_PCPORT 0x04
 
 static struct t_cfg_definition ide64_config[] = {
     { CFG_IDE64_MOUNT,  CFG_TYPE_ENUM,   "Mount Image at Startup", "%s", en_dis, 0,   1, 0 },
     { CFG_IDE64_IMAGE,  CFG_TYPE_STRING, "Drive 0 Image",          "%s", NULL,   0, 127, (long)"" },
+    { CFG_IDE64_PCLINK, CFG_TYPE_ENUM,   "PCLink TCP Server",      "%s", en_dis, 0,   1, 1 },
+    { CFG_IDE64_PCPORT, CFG_TYPE_STRING, "PCLink TCP Port",        "%s", NULL,   2,   8, (long)"64245" },
     { CFG_TYPE_END,     CFG_TYPE_END,    "",                       "",   NULL,   0,   0, 0 } };
 
 static Ide64 *ide64_instance = NULL;
@@ -137,6 +143,9 @@ Ide64 :: Ide64()
     regs = (volatile ide64_regs_t *)IDE64_BASE;
     buffer = (volatile uint8_t *)(IDE64_BASE + IDE64_BUFFER_OFFSET);
     rtc_regs = (volatile uint8_t *)(IDE64_BASE + IDE64_RTC_OFFSET);
+    usb_regs = (volatile uint8_t *)(IDE64_BASE + IDE64_USB_OFFSET);
+    usb_rx = (volatile uint8_t *)(IDE64_BASE + IDE64_USB_RX_OFFSET);
+    usb_tx = (volatile uint8_t *)(IDE64_BASE + IDE64_USB_TX_OFFSET);
     memset(rtc_ram, 0, sizeof(rtc_ram));
     rtc_file = IDE64_RTC_FLASH_FILE;
     rtc_dirty = false;
@@ -160,6 +169,10 @@ void Ide64 :: init(void)
     rtc_load(IDE64_RTC_FLASH_FILE);
     install_high_irq(ITU_IRQHIGH_IDE64, Ide64 :: irq, this);
     xTaskCreate(Ide64 :: task, "IDE64", configMINIMAL_STACK_SIZE, this, PRIO_DRIVER, &taskHandle);
+    usb_regs[4] = IDE64_USB_FLUSH; // not connected
+    if (cfg->get_value(CFG_IDE64_PCLINK)) {
+        xTaskCreate(Ide64 :: pclink_task, "IDE64 PCLink", configMINIMAL_STACK_SIZE, this, PRIO_BACKGROUND, NULL);
+    }
 }
 
 uint8_t Ide64 :: irq(void *context)
@@ -772,21 +785,147 @@ void Ide64 :: rtc_load(const char *filename)
     printf("IDE64: RTC RAM loaded from %s\n", filename);
 }
 
-void Ide64 :: rtc_save(void)
+static void write_rtc_file(const char *name, const uint8_t *data)
 {
     FileManager *fm = FileManager :: getFileManager();
     File *f = NULL;
     uint32_t transferred = 0;
 
-    rtc_dirty = false;
-    FRESULT fres = fm->fopen(rtc_file.c_str(), FA_WRITE | FA_CREATE_ALWAYS, &f);
+    FRESULT fres = fm->fopen(name, FA_WRITE | FA_CREATE_ALWAYS, &f);
     if (fres != FR_OK) {
-        printf("IDE64: can't save RTC RAM to %s: %s\n", rtc_file.c_str(), FileSystem :: get_error_string(fres));
+        printf("IDE64: can't save RTC RAM to %s: %s\n", name, FileSystem :: get_error_string(fres));
         return;
     }
-    f->write(rtc_ram, IDE64_RTC_RAM_SIZE, &transferred);
+    f->write(data, IDE64_RTC_RAM_SIZE, &transferred);
     fm->fclose(f);
-    printf("IDE64: RTC RAM saved to %s\n", rtc_file.c_str());
+    printf("IDE64: RTC RAM saved to %s\n", name);
+}
+
+// Save next to the image, and always to flash too: the flash copy is loaded before
+// the C64 starts, while the startup image is only mounted once USB is up, after
+// IDEDOS has already read its settings.
+void Ide64 :: rtc_save(void)
+{
+    rtc_dirty = false;
+    write_rtc_file(rtc_file.c_str(), rtc_ram);
+    if (strcmp(rtc_file.c_str(), IDE64_RTC_FLASH_FILE) != 0) {
+        write_rtc_file(IDE64_RTC_FLASH_FILE, rtc_ram);
+    }
+}
+
+/*********************************************************************/
+/* PCLink                                                            */
+/*********************************************************************/
+// The FT245 USB FIFO of the V4.x cartridge, bridged to a TCP client, as VICE's
+// "IDE64 USB server" does. Use with: ideservd -m vice -i <ultimate address>
+void Ide64 :: pclink_task(void *a)
+{
+    ((Ide64 *)a)->pclink_run();
+}
+
+void Ide64 :: pclink_run(void)
+{
+    int port = atoi(cfg->get_string(CFG_IDE64_PCPORT));
+    if (port <= 0) {
+        port = 64245;
+    }
+
+    for (;;) {
+        int listenfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (listenfd < 0) {
+            vTaskDelay(5 * configTICK_RATE_HZ);
+            continue;
+        }
+        struct sockaddr_in serv_addr;
+        memset(&serv_addr, 0, sizeof(serv_addr));
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_addr.s_addr = INADDR_ANY;
+        serv_addr.sin_port = htons(port);
+        if ((bind(listenfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) || (listen(listenfd, 1) < 0)) {
+            printf("IDE64 PCLink: can't listen on port %d\n", port);
+            closesocket(listenfd);
+            vTaskDelay(5 * configTICK_RATE_HZ);
+            continue;
+        }
+        printf("IDE64 PCLink: listening on port %d\n", port);
+
+        for (;;) {
+            struct sockaddr_in cli_addr;
+            socklen_t clilen = sizeof(cli_addr);
+            int sock = accept(listenfd, (struct sockaddr *)&cli_addr, &clilen);
+            if (sock < 0) {
+                break;
+            }
+            pclink_serve(sock);
+            closesocket(sock);
+        }
+        closesocket(listenfd);
+        vTaskDelay(configTICK_RATE_HZ);
+    }
+}
+
+void Ide64 :: pclink_serve(int sock)
+{
+    uint8_t in[256];
+    uint8_t out[256];
+    int in_len = 0, in_pos = 0;
+    int flags = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flags, sizeof(flags));
+
+    printf("IDE64 PCLink: client connected\n");
+    usb_regs[4] = IDE64_USB_CONNECTED | IDE64_USB_FLUSH;
+
+    for (;;) {
+        bool moved = false;
+
+        // C64 -> PC: everything in the TX ring
+        uint8_t head = usb_regs[2];
+        uint8_t tail = usb_regs[3];
+        if (head != tail) {
+            int n = 0;
+            while (tail != head) {
+                out[n++] = usb_tx[tail++];
+            }
+            usb_regs[3] = tail;
+            if (send(sock, out, n, 0) != n) {
+                break;
+            }
+            moved = true;
+        }
+
+        // PC -> C64: as much as fits in the RX ring; the rest waits (TCP flow control)
+        if (in_pos >= in_len) {
+            int r = recv(sock, in, sizeof(in), MSG_DONTWAIT);
+            if (r == 0) {
+                break; // closed by the PC
+            }
+            if (r < 0) {
+                if ((errno != EWOULDBLOCK) && (errno != EAGAIN)) {
+                    break;
+                }
+            } else {
+                in_len = r;
+                in_pos = 0;
+            }
+        }
+        if (in_pos < in_len) {
+            uint8_t rx_head = usb_regs[0];
+            uint8_t rx_tail = usb_regs[1];
+            while ((in_pos < in_len) && ((uint8_t)(rx_head + 1) != rx_tail)) {
+                usb_rx[rx_head++] = in[in_pos++];
+                moved = true;
+            }
+            usb_regs[0] = rx_head;
+        }
+
+        if (moved) {
+            taskYIELD();
+        } else {
+            vTaskDelay(1);
+        }
+    }
+    usb_regs[4] = IDE64_USB_FLUSH; // disconnected: drop both rings
+    printf("IDE64 PCLink: client disconnected\n");
 }
 
 void Ide64 :: set_startup_image(const char *fullpath)

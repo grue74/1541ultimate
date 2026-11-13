@@ -32,6 +32,12 @@ typedef struct {
 
 #define IDE64_RTC_OFFSET     0x100 // DS1302 register file: 0-7 clock, 8 trickle, 32-63 RAM
 #define IDE64_BUFFER_OFFSET  0x200
+#define IDE64_USB_OFFSET     0x140 // FT245: 0 RX head, 1 RX tail, 2 TX head, 3 TX tail, 4 control
+#define IDE64_USB_RX_OFFSET  0x400 // ring to the C64
+#define IDE64_USB_TX_OFFSET  0x500 // ring from the C64
+
+#define IDE64_USB_CONNECTED  0x01
+#define IDE64_USB_FLUSH      0x02
 
 #define IDE64_CTRL_ARM       0x01 // start a data phase (pointer = 0, DRQ)
 #define IDE64_CTRL_DATA_OUT  0x02 // C64 writes the buffer
@@ -88,6 +94,9 @@ class Ide64 : public ConfigurableObject
     volatile ide64_regs_t *regs;
     volatile uint8_t *buffer;
     volatile uint8_t *rtc_regs;
+    volatile uint8_t *usb_regs;
+    volatile uint8_t *usb_rx;
+    volatile uint8_t *usb_tx;
     TaskHandle_t taskHandle;
     SemaphoreHandle_t mutex;
     uint8_t present_mask;
@@ -108,6 +117,11 @@ class Ide64 : public ConfigurableObject
     void set_clock_from_c64(void);
     void rtc_load(const char *filename);
     void rtc_save(void);
+
+    // PCLink: the FT245 FIFO bridged to a TCP client (ideservd -m vice)
+    static void pclink_task(void *a);
+    void pclink_run(void);
+    void pclink_serve(int sock);
 
     static void task(void *a);
     static uint8_t irq(void *context);

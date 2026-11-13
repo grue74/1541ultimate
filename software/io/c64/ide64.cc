@@ -16,7 +16,6 @@
 #include "init_function.h"
 #include "rtc.h"
 #include "socket.h"
-#include <errno.h>
 
 #define CFG_IDE64_IMAGE  0x01
 #define CFG_IDE64_MOUNT  0x02
@@ -758,7 +757,11 @@ void Ide64 :: set_clock_from_c64(void)
     rtc.set_time_in_chip(rtc.get_correction(), y, M, D, wd, h, m, s);
 }
 
-// Load the RTC RAM from a file. If it doesn't exist, the current contents stay.
+static void write_rtc_file(const char *name, const uint8_t *data);
+
+// Load the RTC RAM from a file. If it doesn't exist, the current contents stay
+// (and are saved to it). Settings loaded from an image are copied to flash too:
+// the flash copy is what the C64 gets at the next power-up, before USB is up.
 void Ide64 :: rtc_load(const char *filename)
 {
     FileManager *fm = FileManager :: getFileManager();
@@ -770,12 +773,17 @@ void Ide64 :: rtc_load(const char *filename)
         rtc_save();
     }
     rtc_file = filename;
-    if (fm->fopen(filename, FA_READ, &f) != FR_OK) {
-        return;
+    bool is_flash = (strcmp(filename, IDE64_RTC_FLASH_FILE) == 0);
+    if (fm->fopen(filename, FA_READ, &f) == FR_OK) {
+        f->read(data, IDE64_RTC_RAM_SIZE, &transferred);
+        fm->fclose(f);
     }
-    f->read(data, IDE64_RTC_RAM_SIZE, &transferred);
-    fm->fclose(f);
     if (transferred != IDE64_RTC_RAM_SIZE) {
+        printf("IDE64: no RTC RAM in %s\n", filename);
+        if (!is_flash) {
+            rtc_dirty = true; // the image gets the current settings
+            rtc_changed = xTaskGetTickCount();
+        }
         return;
     }
     memcpy(rtc_ram, data, IDE64_RTC_RAM_SIZE);
@@ -783,6 +791,9 @@ void Ide64 :: rtc_load(const char *filename)
         rtc_regs[32 + i] = rtc_ram[i];
     }
     printf("IDE64: RTC RAM loaded from %s\n", filename);
+    if (!is_flash) {
+        write_rtc_file(IDE64_RTC_FLASH_FILE, rtc_ram);
+    }
 }
 
 static void write_rtc_file(const char *name, const uint8_t *data)
@@ -872,6 +883,7 @@ void Ide64 :: pclink_serve(int sock)
     int flags = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flags, sizeof(flags));
 
+    const char *reason = "";
     printf("IDE64 PCLink: client connected\n");
     usb_regs[4] = IDE64_USB_CONNECTED | IDE64_USB_FLUSH;
 
@@ -888,22 +900,35 @@ void Ide64 :: pclink_serve(int sock)
             }
             usb_regs[3] = tail;
             if (send(sock, out, n, 0) != n) {
+                reason = "send error";
                 break;
             }
             moved = true;
         }
 
-        // PC -> C64: as much as fits in the RX ring; the rest waits (TCP flow control)
+        // PC -> C64: as much as fits in the RX ring; the rest waits (TCP flow control).
+        // select() says whether there is something to read, so a failing recv() is a
+        // real error or a close, never "no data yet".
         if (in_pos >= in_len) {
-            int r = recv(sock, in, sizeof(in), MSG_DONTWAIT);
-            if (r == 0) {
-                break; // closed by the PC
+            fd_set readset;
+            struct timeval tv = { 0, 0 };
+            FD_ZERO(&readset);
+            FD_SET(sock, &readset);
+            int sel = select(sock + 1, &readset, NULL, NULL, &tv);
+            if (sel < 0) {
+                reason = "select failed";
+                break;
             }
-            if (r < 0) {
-                if ((errno != EWOULDBLOCK) && (errno != EAGAIN)) {
+            if ((sel > 0) && FD_ISSET(sock, &readset)) {
+                int r = recv(sock, in, sizeof(in), 0);
+                if (r == 0) {
+                    reason = "closed by the PC";
                     break;
                 }
-            } else {
+                if (r < 0) {
+                    reason = "receive error";
+                    break;
+                }
                 in_len = r;
                 in_pos = 0;
             }
@@ -925,7 +950,7 @@ void Ide64 :: pclink_serve(int sock)
         }
     }
     usb_regs[4] = IDE64_USB_FLUSH; // disconnected: drop both rings
-    printf("IDE64 PCLink: client disconnected\n");
+    printf("IDE64 PCLink: client disconnected (%s)\n", reason);
 }
 
 void Ide64 :: set_startup_image(const char *fullpath)

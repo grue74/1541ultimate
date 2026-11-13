@@ -67,7 +67,8 @@ extern "C" {
 #define CAPAB_STEREO_SID    0x00020000
 #define CAPAB_COMMAND_INTF  0x00040000
 #define CAPAB_COPPER        0x00080000
-#define CAPAB_IDE64         0x00100000 // was CAPAB_OVERLAY
+#define CAPAB_IDE64         0x00100000 // was CAPAB_OVERLAY; no current FPGA sets the overlay (g_video_overlay = false)
+#define CAPAB_OVERLAY       CAPAB_IDE64 // old name, still tested by the original U2 updaters
 #define CAPAB_SAMPLER       0x00200000
 #define CAPAB_EEPROM		0x00400000
 #define CAPAB_USB_HOST2     0x00800000

@@ -1,7 +1,8 @@
 # IDE64 cartridge emulation: findings and plan
 
 Status: feasibility checked and the hardware spec extracted from VICE (2026-11-10).
-Phase 1 implemented, simulated and built for U2+; not yet run on hardware (2026-11-12).
+Phase 1 implemented, built for U2+ and boots IDEDOS on hardware (C128 + U2+, 2026-11-13).
+Phase 2/3 (ATA device) implemented, simulated and built for U2+; not yet run on hardware.
 
 Reference implementation: VICE, `E:\GitHub\svn-mirror\vice`
 - `src/c64/cart/ide64.c`: cart logic, IO map, banking, RTC, CRT loading
@@ -502,12 +503,14 @@ the PC, and it's no use to the U64E-II. The ACIA/modem code is not touched.
 
 ### Phase 0: preparation
 - [x] Extract the register and memory map from VICE (§2).
-- [ ] Get an IDEDOS ROM (`.crt` V4.1) and a test `.hdd` image that work in VICE.
+- [x] IDEDOS ROM: `idedos20261011-c64-beta.crt` (repo root, untracked).
+- [ ] A test `.hdd` image that works in VICE.
 - [ ] For U64E-II: ask how the U64E2 bitstream is built (Vivado project, version).
 
 ### Phase 1: VHDL, banking and modes only (no disk)
-Status (2026-11-12): implemented, simulated, host-tested and built for U2+ (fits, timing
-met); **not yet run on hardware**. Nothing is committed yet.
+Status (2026-11-13): implemented, simulated, host-tested, built for U2+ (fits, timing
+met) and committed locally (0c1ea0cf, e69a378b). **Boots on hardware**: C128 + U2+ with
+`idedos20261011-c64-beta.crt` (IDEDOS beta, 2026-10-11).
 - [x] `g_ide64 : boolean := false` generic on `all_carts_v5`, `slot_server_v4` and
       `ultimate_logic_32`; capability bit 20 (`CAPAB_IDE64`, the old unused
       `CAPAB_OVERLAY` bit) reports it to the firmware.
@@ -558,8 +561,7 @@ met); **not yet run on hardware**. Nothing is committed yet.
       `build_u2plus_update.sh`. The latter builds `tools/*.exe` with MSYS2 gcc and passes
       them as make overrides, because Git Bash runs the extensionless Linux ELF
       `tools/hex2bin` ahead of `hex2bin.exe`.
-- [ ] Milestone: IDEDOS boots and shows its banner. With no drive it should report that
-      no device was found.
+- [x] Milestone: IDEDOS boots and shows its banner (user test, C128 + U2+, 2026-11-13).
 - **First hardware checks (not covered by the testbench):**
   - GAME switching per half cycle: the testbench PLA reacts to GAME with a fixed delay,
     not to real PHI2 edge timing. If GAME arrives late in PHI2, C64 DRAM may drive
@@ -569,32 +571,77 @@ met); **not yet run on hardware**. Nothing is committed yet.
     force kernal replacement off while the cart is IDE64.
 
 ### Phase 2: ATA device in the FPGA
-- [ ] New entity `fpga/cart_slot/vhdl_source/ide64_ata.vhd`:
-  - **C64 side** (`$DE20-$DE31`): the task file registers, the 16-bit latch semantics,
-    and the data-pointer increment on a `$DE20` read or write.
-    - While BSY, regs 1–6 read as status.
-    - DRQ = pointer < 512.
-    - SRST via reg 14.
-    - Interface select via `$DE28`/`$DE29`.
-  - **CPU side:** an `io_bus` register block: the task file snapshot, a "command written"
-    flag plus IRQ, a status/error write-back, and an "unknown device" flag per drive.
-  - a 512-byte dual-port sector buffer (block RAM)
-- [ ] Hook it into `slot_server_v4` through a free `i_split_8K` slot (`0x404C000` or above),
-      under `g_ide64`. ACIA (`io_req_acia` at `0x404A000`) is the template.
-- [ ] GHDL testbench under `fpga/cart_slot/vhdl_sim` that drives C64 bus cycles and CPU
-      accesses.
+Status (2026-11-13): implemented, simulated and built for U2+; not yet run on hardware.
+- [x] `fpga/cart_slot/vhdl_source/ide64_ata.vhd` + `ide64_ata_pkg.vhd` (CPU register map):
+  - **C64 side** (`$DE20-$DE2F`, `$DE31`), following `ata.c`:
+    - one task file shared by all four devices (2 interfaces × master/slave); a device
+      answers only if its "present" bit is set, otherwise reads return the last IDE bus
+      value (as in Phase 1)
+    - `$DE20` data: word pointer into a 512-byte buffer (two 256×8 M9Ks, even/odd bytes,
+      port B always addressed at the pointer so the read data is ready combinationally)
+    - reading `$DE20` latches the high byte for `$DE31`; writing `$DE31` sets the high byte
+      of the next `$DE2x` write
+    - BSY set in the same clock as the command write; task file and command writes ignored
+      while BSY or DRQ; a command to an absent device is ignored except `$90`
+    - while BSY, regs 1–6 read as status; reg 15 = drive address
+    - SRST (reg 14 bit 2, 1→0) and C64 reset load the `drive_diag` signature
+    - interface select by writing `$DE28`/`$DE29`
+  - **CPU side** (`IDE64_BASE` = `0x404E000`, port 7 of `i_split_8K`):
+    task file R/W, command, status (CPU owns all bits but BSY/DRQ), control (completes a
+    step: clears BSY, arms a data-in / data-out phase, "BSY again when drained" for
+    multi-sector reads; data-out always goes BSY when full), events (command, buffer
+    drained/filled, reset; write 1 to clear), present mask + IRQ enable, devctl,
+    interface, pointer. Buffer at offset `$200`.
+  - While a reset event is pending, CPU writes to the task file, status and control are
+    dropped, so a late completion can't overwrite the post-reset state.
+- [x] `all_carts_v5` exports `ide64_active` (`c_ide64` and `cart_en`); the Phase 1 IDE bus
+      placeholder is gone. `slot_server_v4` instantiates `ide64_ata` under `g_ide64`
+      (else `io_dummy`) and has a new `io_irq_ide64` output.
+- [x] IRQ: `ultimate_logic_32` ORs it into ITU `irq_high(4)` (`bling_irq`, no firmware
+      handler exists; `ITU_IRQHIGH_IDE64` = 4). All eight high IRQs are taken. **Ask
+      upstream** whether the U64 top drives `bling_irq`; if so, a stuck bling IRQ would
+      now call the IDE64 handler, which only reads its own event register.
+- [x] New files added to every Quartus/Diamond project that lists `all_carts_v5`.
+- [x] Testbench: `tb_ide64.vhd` (ModelSim, not GHDL) now includes `ide64_ata` and a
+      firmware model on its io_bus. Covers IDENTIFY (256 words), READ ×2 with a BSY refill
+      between sectors, WRITE (data checked on the CPU side), regs reading as status while
+      BSY, task file write ignored while BSY, abort (`$E5` in the model), absent device 1
+      and interface 1 returning the bus value, SRST in the middle of a slow command with
+      the late completion dropped, and IDENTIFY after SRST. **82 checks pass.** Compile
+      order: add `ide64_ata_pkg` and `ide64_ata` after `all_carts_v5`.
+  - Found and fixed a testbench bug: the `cycle` procedure held every write for two C64
+    cycles, so Phase 1 had been testing double writes all along.
+- [x] U2+ build (no SID + IDE64 Phase 1+2):
+
+      | | Phase 1 | Phase 2 |
+      |---|---|---|
+      | Logic elements | 20,377 | 20,688 (93 %, 1,632 free) |
+      | M9K | 43 | 45 / 66 |
+      | Worst setup slack | 0.448 ns | 0.450 ns (DDR2 PHY `pll1 clk[2]`) |
+      | Worst hold slack | 0.398 ns | 0.107 ns (fast model, DDR2 PHY `pll1 clk[0]`) |
 
 ### Phase 3: firmware ATA emulation
-- [ ] New driver in `software/io/c64/` (e.g. `ide64.cc`). On the command IRQ:
-  - decode the command (must-have list in §2), handle CHS/LBA
-  - fill or drain the buffer per sector, then clear BSY / set DRQ or ERR
-  - multi-sector transfers refill the buffer each time DRQ drops
-  - IDENTIFY words follow `ata.c`
-- [ ] Mount a `.hdd`/`.cfa` image from the file browser through `BlockDevice_File` (a
-      new filetype handler). Detect the geometry as in `detect_ide64_image`, add a config
-      item for the image path, and auto-mount it at boot.
+Status (2026-11-13): written, builds for U2+; not yet run on hardware.
+- [x] `software/io/c64/ide64.{h,cc}` (`Ide64`): FreeRTOS task woken by the high IRQ (the
+      ISR masks the IRQ, the task re-enables it). Commands follow `ata_execute_command`:
+  - READ/WRITE SECTORS (`$20/$21`, `$30/$31`), CHS through the current translation or LBA28,
+    one buffer per sector, multi-sector via the buffer event; errors IDNF / UNC|ABRT /
+    WP|ABRT with `ata_set_command_block`
+  - IDENTIFY (`ata.c` words, own strings "ULTIMATE IDE64 HDD/CFA"), INITIALIZE DEVICE
+    PARAMETERS, EXECUTE DIAGNOSTIC, SET FEATURES (`$02 $03 $33 $55 $82 $99 $AA`),
+    READ VERIFY, SEEK, READ/WRITE BUFFER, FLUSH CACHE, CHECK POWER MODE, power commands
+    accepted (SLEEP doesn't lock the drive, unlike VICE's HDD)
+- [x] Image access: `File` seek/read/write directly (simpler than `BlockDevice_File`);
+      geometry as in `detect_ide64_image` + the CHS search of `ata_poweron`; `.hdd` = HDD,
+      anything else = CF; opened read-only if it can't be opened for writing.
+- [x] `filetypes/filetype_ide64.{h,cc}`: `.hdd`/`.cfa` → "Mount on IDE64", "Mount on IDE64
+      at Startup" (stores the path in the "IDE64 Settings" store and enables the
+      startup mount), "Unmount IDE64 Drive". The startup mount retries once a second for
+      a minute, because USB media appear late.
+- [x] Added to the U2+ Nios, U64 Nios2/RISC-V and U64E-II makefiles (not U2+L / U2).
 - [ ] A "create new IDE64 image" menu action that preallocates the file at a chosen size.
       IDEDOS's own setup tool can format it as CFS.
+- [ ] Only interface 0 master; slave and interface 1 are wired in the FPGA but not served.
 - [ ] Milestone: IDEDOS sees the drive, and a directory listing, a file load and a save work.
 
 ### Phase 4: RTC, USB stub and polish

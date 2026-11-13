@@ -86,7 +86,8 @@ begin
         end if;
     end process;
 
-    c64_rd_data <= active and slot_req.io_read  and not rx_empty when slot_req.io_address(8 downto 0) = "001011101" else '0';
+    -- a read while BA is low is repeated by the halted 6510: only the completed one pops
+    c64_rd_data <= active and slot_req.io_read and slot_req.io_ba and not rx_empty when slot_req.io_address(8 downto 0) = "001011101" else '0';
     c64_wr_data <= active and slot_req.io_write and connected and not tx_full when slot_req.io_address(8 downto 0) = "001011101" else '0';
 
     -- Port B reads the RX byte at the tail, except for the clock that writes a TX byte

@@ -15,6 +15,8 @@ package slot_bus_pkg is
         late_write      : std_logic;
         data            : std_logic_vector(7 downto 0);
         sample_io       : std_logic; -- timing signal, pulses when IO lines and address should be stable
+        io_ba           : std_logic; -- BA during the cycle of io_read: '0' = the CPU is halted (RDY low)
+                                     -- and repeats this read, so it has not completed yet
     end record;
     
     type t_slot_resp is record
@@ -34,6 +36,7 @@ package slot_bus_pkg is
         io_write      => '0',
         late_write    => '0',
         sample_io     => '0',
+        io_ba         => '1',
         data          => X"00" );
      
     constant c_slot_resp_init : t_slot_resp := (

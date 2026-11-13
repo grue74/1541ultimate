@@ -139,6 +139,7 @@ begin
 
                 slot_req.bus_write  <= not RWn;
                 slot_req.io_address <= ADDRESS;
+                slot_req.io_ba      <= BA;
                 mem_wdata_i         <= DATA_in;
 
                 late_write_cond <= not RWn;

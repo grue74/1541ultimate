@@ -887,6 +887,10 @@ begin
         check_open(X"DE5D", "FT245 no data");
         usb_fw(1);
         check(X"DE5E", X"00", "FT245 status: data, can send");
+        BA <= '0'; -- halted CPU: these reads are repeated, they must not pop
+        check(X"DE5D", X"41", "FT245 RX 1, BA low");
+        check(X"DE5D", X"41", "FT245 RX 1, BA low again");
+        BA <= '1';
         check(X"DE5D", X"41", "FT245 RX 1");
         check(X"DE5D", X"42", "FT245 RX 2");
         check(X"DE5D", X"43", "FT245 RX 3");

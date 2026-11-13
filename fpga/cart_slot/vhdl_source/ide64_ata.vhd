@@ -216,7 +216,7 @@ begin
 
     -- DS1302 at DE5F. Every access is one SCLK pulse; it stops responding when the cart is killed.
     rtc_active <= active and not killed;
-    rtc_strobe <= rtc_active and (slot_req.io_read or slot_req.io_write) when slot_req.io_address(8 downto 0) = "001011111" else '0';
+    rtc_strobe <= rtc_active and ((slot_req.io_read and slot_req.io_ba) or slot_req.io_write) when slot_req.io_address(8 downto 0) = "001011111" else '0';
     rtc_cpu_en <= (io_req.read or io_req.write) and sel_rtc;
 
     -- FT245 USB FIFO at DE5D/DE5E (PCLink)
@@ -255,7 +255,9 @@ begin
         ev_time         => rtc_wr_time,
         ev_ram          => rtc_wr_ram );
 
-    c64_rd_reg <= active and slot_req.io_read  when slot_req.io_address(8 downto 4) = "00010" else '0';
+    -- Reads with side effects only count when they complete: while BA is low the 6510
+    -- is halted and repeats the read cycle (badlines, sprites), up to 3 times.
+    c64_rd_reg <= active and slot_req.io_read and slot_req.io_ba when slot_req.io_address(8 downto 4) = "00010" else '0';
     c64_wr_reg <= active and slot_req.io_write when slot_req.io_address(8 downto 4) = "00010" else '0';
     c64_wr_hi  <= active and slot_req.io_write when slot_req.io_address(8 downto 0) = "000110001" else '0';
 

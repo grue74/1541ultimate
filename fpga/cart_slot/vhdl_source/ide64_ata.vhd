@@ -101,7 +101,8 @@ architecture gideon of ide64_ata is
     signal slot_resp_ata: t_slot_resp;
     signal slot_resp_usb: t_slot_resp;
     signal usb_reg_en   : std_logic;
-    signal usb_ram_en   : std_logic;
+    signal usb_tx_en    : std_logic;
+    signal usb_rx_en    : std_logic;
     signal usb_rdata    : std_logic_vector(7 downto 0);
     signal usb_ack      : std_logic;
 
@@ -110,7 +111,8 @@ architecture gideon of ide64_ata is
     signal sel_rtc      : std_logic; -- $100-$13F
     signal sel_usb      : std_logic; -- $140-$17F
     signal sel_buf      : std_logic; -- $200-$3FF
-    signal sel_usb_ram  : std_logic; -- $400-$5FF
+    signal sel_usb_tx   : std_logic; -- $400-$4FF
+    signal sel_usb_rx   : std_logic; -- $1000-$1FFF
     signal c64_reset_d  : std_logic := '0';
 
     -- derived
@@ -190,11 +192,12 @@ begin
         end if;
     end process;
 
-    sel_regs    <= '1' when io_req.address(10 downto 8) = "000" else '0';
-    sel_rtc     <= '1' when io_req.address(10 downto 6) = "00100" else '0';
-    sel_usb     <= '1' when io_req.address(10 downto 6) = "00101" else '0';
-    sel_buf     <= '1' when io_req.address(10 downto 9) = "01" else '0';
-    sel_usb_ram <= '1' when io_req.address(10 downto 9) = "10" else '0';
+    sel_regs    <= '1' when io_req.address(12 downto 8) = "00000" else '0';
+    sel_rtc     <= '1' when io_req.address(12 downto 6) = "0000100" else '0';
+    sel_usb     <= '1' when io_req.address(12 downto 6) = "0000101" else '0';
+    sel_buf     <= '1' when io_req.address(12 downto 9) = "0001" else '0';
+    sel_usb_tx  <= '1' when io_req.address(12 downto 8) = "00100" else '0';
+    sel_usb_rx  <= '1' when io_req.address(12) = '1' else '0';
 
     slot_resp <= or_reduce(slot_resp_ata & slot_resp_usb);
 
@@ -225,7 +228,8 @@ begin
 
     -- FT245 USB FIFO at DE5D/DE5E (PCLink)
     usb_reg_en <= (io_req.read or io_req.write) and sel_usb;
-    usb_ram_en <= (io_req.read or io_req.write) and sel_usb_ram;
+    usb_tx_en  <= (io_req.read or io_req.write) and sel_usb_tx;
+    usb_rx_en  <= (io_req.read or io_req.write) and sel_usb_rx;
 
     i_usb: entity work.ide64_usb
     port map (
@@ -235,9 +239,10 @@ begin
         slot_req        => slot_req,
         slot_resp       => slot_resp_usb,
         reg_en          => usb_reg_en,
-        ram_en          => usb_ram_en,
+        tx_en           => usb_tx_en,
+        rx_en           => usb_rx_en,
         cpu_we          => io_req.write,
-        cpu_addr        => io_req.address(8 downto 0),
+        cpu_addr        => io_req.address(11 downto 0),
         cpu_wdata       => io_req.data,
         cpu_rdata       => usb_rdata,
         cpu_ack         => usb_ack );

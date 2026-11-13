@@ -32,9 +32,10 @@ typedef struct {
 
 #define IDE64_RTC_OFFSET     0x100 // DS1302 register file: 0-7 clock, 8 trickle, 32-63 RAM
 #define IDE64_BUFFER_OFFSET  0x200
-#define IDE64_USB_OFFSET     0x140 // FT245: 0 RX head, 1 RX tail, 2 TX head, 3 TX tail, 4 control
-#define IDE64_USB_RX_OFFSET  0x400 // ring to the C64
-#define IDE64_USB_TX_OFFSET  0x500 // ring from the C64
+#define IDE64_USB_OFFSET     0x140 // FT245: 0/5 RX head lo/hi, 1/6 RX tail lo/hi, 2 TX head, 3 TX tail, 4 control
+#define IDE64_USB_RX_OFFSET  0x1000 // ring to the C64, 4 KB
+#define IDE64_USB_TX_OFFSET  0x400  // ring from the C64, 256 bytes
+#define IDE64_USB_RX_SIZE    4096
 
 #define IDE64_USB_CONNECTED  0x01
 #define IDE64_USB_FLUSH      0x02

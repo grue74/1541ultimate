@@ -54,7 +54,7 @@ package ide64_ata_pkg is
 
     -- Offsets $100-$13F: DS1302 register file (ide64_rtc). 0-7 clock, 8 trickle charge,
     -- 32-63 RAM. The CPU keeps the clock registers current.
-    -- Offsets $140-$144: FT245 ring pointers and control (ide64_usb).
-    -- Offsets $400-$5FF: FT245 rings, $400 RX (to the C64), $500 TX (from the C64).
+    -- Offsets $140-$146: FT245 ring pointers and control (ide64_usb).
+    -- Offsets $400-$4FF: FT245 TX ring (from the C64); $1000-$1FFF: RX ring (to the C64).
 
 end package;

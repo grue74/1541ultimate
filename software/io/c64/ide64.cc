@@ -1003,13 +1003,20 @@ void Ide64 :: pclink_serve(int sock)
             }
         }
         if (in_pos < in_len) {
-            uint8_t rx_head = usb_regs[0];
-            uint8_t rx_tail = usb_regs[1];
-            while ((in_pos < in_len) && ((uint8_t)(rx_head + 1) != rx_tail)) {
-                usb_rx[rx_head++] = in[in_pos++];
+            const uint16_t mask = IDE64_USB_RX_SIZE - 1;
+            uint16_t rx_head = usb_regs[0] | ((uint16_t)usb_regs[5] << 8);
+            uint16_t rx_tail = usb_regs[1];          // reading the low byte latches the high byte
+            rx_tail |= (uint16_t)usb_regs[6] << 8;
+            uint16_t start = rx_head;
+            while ((in_pos < in_len) && (((rx_head + 1) & mask) != rx_tail)) {
+                usb_rx[rx_head] = in[in_pos++];
+                rx_head = (rx_head + 1) & mask;
+            }
+            if (rx_head != start) {
+                usb_regs[5] = (uint8_t)(rx_head >> 8); // high byte first: the low byte write commits
+                usb_regs[0] = (uint8_t)rx_head;
                 moved = true;
             }
-            usb_regs[0] = rx_head;
         }
 
         // While a transfer is going on, keep the rings serviced without sleeping: the

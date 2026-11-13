@@ -400,17 +400,18 @@ begin
                 case usb_kind is
                 when 1 =>
                     io_wr(16#144#, X"03"); -- connected, flush
-                    io_wr(16#400#, X"41");
-                    io_wr(16#401#, X"42");
-                    io_wr(16#402#, X"43");
-                    io_wr(16#140#, X"03"); -- RX head
+                    io_wr(16#1000#, X"41");
+                    io_wr(16#1001#, X"42");
+                    io_wr(16#1002#, X"43");
+                    io_wr(16#145#, X"00"); -- RX head high (hold)
+                    io_wr(16#140#, X"03"); -- RX head low: commits
                 when 2 =>
                     io_rd(16#142#, v_d); -- TX head
                     v_n := to_integer(unsigned(v_d));
                     usb_txn <= v_n;
-                    io_rd(16#500#, v_d);
+                    io_rd(16#400#, v_d);
                     usb_tx0 <= v_d;
-                    io_rd(16#502#, v_d);
+                    io_rd(16#402#, v_d);
                     usb_tx2 <= v_d;
                     io_wr(16#143#, std_logic_vector(to_unsigned(v_n, 8))); -- TX tail
                 when others =>

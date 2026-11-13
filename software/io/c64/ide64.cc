@@ -179,7 +179,7 @@ void Ide64 :: init(void)
     xTaskCreate(Ide64 :: task, "IDE64", configMINIMAL_STACK_SIZE, this, PRIO_DRIVER, &taskHandle);
     usb_regs[4] = IDE64_USB_FLUSH; // not connected
     if (cfg->get_value(CFG_IDE64_PCLINK)) {
-        xTaskCreate(Ide64 :: pclink_task, "IDE64 PCLink", configMINIMAL_STACK_SIZE, this, PRIO_BACKGROUND, NULL);
+        xTaskCreate(Ide64 :: pclink_task, "IDE64 PCLink", configMINIMAL_STACK_SIZE, this, PRIO_DRIVER, NULL);
     }
 }
 
@@ -941,6 +941,7 @@ void Ide64 :: pclink_serve(int sock)
     int out_len = 0;
     TickType_t out_since = 0;
     int in_len = 0, in_pos = 0;
+    TickType_t last_move = 0;
     int flags = 1;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flags, sizeof(flags));
 
@@ -1011,7 +1012,15 @@ void Ide64 :: pclink_serve(int sock)
             usb_regs[0] = rx_head;
         }
 
+        // While a transfer is going on, keep the rings serviced without sleeping: the
+        // C64 drains 255 bytes in a few ms, and a 5 ms tick of sleep (or a time slice
+        // given to another task) leaves IDEDOS waiting on an empty FIFO. A real FT245
+        // is refilled every USB frame (1 ms). When idle, poll once per tick.
+        TickType_t now = xTaskGetTickCount();
         if (moved) {
+            last_move = now;
+        }
+        if ((now - last_move) < (configTICK_RATE_HZ / 10)) {
             taskYIELD();
         } else {
             vTaskDelay(1);

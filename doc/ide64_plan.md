@@ -674,11 +674,25 @@ Status (2026-11-13): written, builds for U2+; not yet run on hardware.
     Ultimate's RTC chip. RAM saved 2 s after the last change and on reset to
     `<image>.rtc` (e.g. `ide.hdd.rtc`), or `/flash/ide64.rtc` with no image mounted;
     loaded on mount and at startup.
-- [ ] FT245 / PCLink (§2c option A):
-  - byte FIFOs at `$DE5D`/`$DE5E` (status `$C0` when idle)
-  - a firmware TCP server on port 64245 bridging to the FIFOs
-  - test with `ideservd -m vice -i <ultimate-ip>`, or in VICE first, to check the IDEDOS
-    build options
+- [x] FT245 / PCLink (§2c option A), **works on hardware** (2026-11-13: large
+      directories and a 200-block load over `ideservd -m vice -i <ultimate-ip>`):
+  - `ide64_usb.vhd`: `$DE5D` data / `$DE5E` status as VICE; RX ring 4 KB at `$1000`,
+    TX ring 256 bytes at `$400`, pointers and control at `$140` of the IDE64 window.
+  - Firmware: TCP server (port 64245, "PCLink TCP Server"/"PCLink TCP Port" in IDE64
+    Settings), one client; C64->PC batched (128 bytes or one tick); PC->C64 only as the
+    ring has room; `select()` before `recv()`; driver priority, no sleeping while bytes move.
+  - Lessons (each one was a hardware failure first):
+    - The 6510 repeats a read while BA is low. Side-effect reads ($DE20 data pointer,
+      $DE5F clock, $DE5D pop) act on `slot_req.io_read_done`: a read has completed at
+      the first cycle with BA high that isn't the same read (`slot_slave`).
+    - IDEDOS doesn't poll the FT245 status before every byte. A real FT245 never runs
+      dry mid-reply, so the RX ring must hold enough (4 KB = ~60 ms of C64 reading)
+      to cover CPU latency; 255 bytes gave CRC ("file data") errors on long loads.
+    - One TCP segment per byte stalls on lwIP's segment limit and delayed ACKs.
+- [x] Startup image: drive 0 reported present from power-on; IDEDOS's first command stays
+      busy (up to 30 s) until USB storage is up, so no HDINIT is needed.
+- [x] IDEDOS settings: also copied to `/flash/ide64.rtc` (loaded before the C64 starts),
+      refreshed whenever an image's `.rtc` is loaded.
 - [ ] Interaction with freeze/menu, `cart_kill`, and reset (back to 8K mode, bank 0).
 - [ ] V4.2 (5-bit bank, 512K) and V3 (`$DE30` latch, `$DE32-$DE35` banking) variants.
 - [ ] Check resources and timing on every target that has `g_ide64` on.

@@ -899,10 +899,7 @@ begin
                     slot_resp.data(1) <= not ide_cfg(0);
                     slot_resp.data(0) <= ide_cfg(1);
                     slot_resp.reg_output <= '1';
-                elsif slot_addr(7 downto 0) = X"5E" then -- FT245 status: no RX data, TX full (no link)
-                    slot_resp.data <= X"C0";
-                    slot_resp.reg_output <= '1';
-                end if;
+                end if; -- DE5D/DE5E (FT245) are served by ide64_usb
             end if;
 
         when others =>

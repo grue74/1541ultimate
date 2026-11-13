@@ -84,6 +84,14 @@ architecture tb of tb_ide64 is
     signal fw_rtc_ram       : natural := 0;     -- DS1302 RAM write events seen by the firmware model
     signal fw_ram0          : std_logic_vector(7 downto 0) := X"00"; -- RAM byte 0, read on the last RAM event
     signal fw_sec           : std_logic_vector(7 downto 0) := X"00"; -- seconds register, read on the last clock event
+    -- FT245: the test asks the firmware model to act (1 = connect + receive "ABC",
+    -- 2 = take the bytes sent by the C64, 3 = disconnect + flush)
+    signal usb_cmd          : natural := 0;
+    signal usb_kind         : natural := 0;
+    signal usb_done         : natural := 0;
+    signal usb_txn          : natural := 0;    -- bytes taken by the last kind 2
+    signal usb_tx0          : std_logic_vector(7 downto 0) := X"00";
+    signal usb_tx2          : std_logic_vector(7 downto 0) := X"00";
 
     -- ATA device, CPU side
     signal io_req           : t_io_req := c_io_req_init;
@@ -367,8 +375,8 @@ begin
 
         procedure wait_event(ev : out std_logic_vector(7 downto 0)) is
         begin
-            if io_irq /= '1' then
-                wait until io_irq = '1';
+            if io_irq /= '1' and usb_cmd = usb_done then
+                wait until io_irq = '1' or usb_cmd /= usb_done;
             end if;
             io_rd(to_integer(c_ide_events), ev);
         end procedure;
@@ -388,6 +396,28 @@ begin
         io_wr(16#102#, X"12");
         loop
             wait_event(v_ev);
+            if usb_cmd /= usb_done then
+                case usb_kind is
+                when 1 =>
+                    io_wr(16#144#, X"03"); -- connected, flush
+                    io_wr(16#400#, X"41");
+                    io_wr(16#401#, X"42");
+                    io_wr(16#402#, X"43");
+                    io_wr(16#140#, X"03"); -- RX head
+                when 2 =>
+                    io_rd(16#142#, v_d); -- TX head
+                    v_n := to_integer(unsigned(v_d));
+                    usb_txn <= v_n;
+                    io_rd(16#500#, v_d);
+                    usb_tx0 <= v_d;
+                    io_rd(16#502#, v_d);
+                    usb_tx2 <= v_d;
+                    io_wr(16#143#, std_logic_vector(to_unsigned(v_n, 8))); -- TX tail
+                when others =>
+                    io_wr(16#144#, X"02"); -- disconnected, flush
+                end case;
+                usb_done <= usb_cmd;
+            end if;
             if v_ev(c_ide_ev_rtc_time) = '1' or v_ev(c_ide_ev_rtc_ram) = '1' then
                 io_wr(to_integer(c_ide_events), v_ev and X"18");
                 if v_ev(c_ide_ev_rtc_time) = '1' then
@@ -694,6 +724,15 @@ begin
             wr(X"DEFB", X"00");
         end procedure;
 
+        procedure usb_fw(kind : natural) is
+            variable n : natural;
+        begin
+            n := usb_cmd + 1;
+            usb_kind <= kind;
+            usb_cmd  <= n;
+            wait until usb_done = n;
+        end procedure;
+
         procedure check_count(actual, exp : natural; msg : string) is
         begin
             if actual /= exp then
@@ -843,6 +882,30 @@ begin
         wr(X"DE27", X"EC");
         wait_status(X"48", "IDENTIFY DRQ");
         read_sector(1000, "IDENTIFY again");
+
+        report "--- FT245";
+        check_open(X"DE5D", "FT245 no data");
+        usb_fw(1);
+        check(X"DE5E", X"00", "FT245 status: data, can send");
+        check(X"DE5D", X"41", "FT245 RX 1");
+        check(X"DE5D", X"42", "FT245 RX 2");
+        check(X"DE5D", X"43", "FT245 RX 3");
+        check(X"DE5E", X"40", "FT245 status: RX empty");
+        check_open(X"DE5D", "FT245 RX empty");
+        wr(X"DE5D", X"61");
+        wr(X"DE5D", X"62");
+        wr(X"DE5D", X"63");
+        usb_fw(2);
+        check_count(usb_txn, 3, "FT245 bytes sent");
+        if usb_tx0 /= X"61" or usb_tx2 /= X"63" then
+            report "FAIL FT245 TX data $" & hex(usb_tx0) & " .. $" & hex(usb_tx2) severity error;
+            v_err := v_err + 1;
+        end if;
+        usb_fw(3);
+        check(X"DE5E", X"C0", "FT245 status: no link");
+        wr(X"DE5D", X"64"); -- dropped
+        usb_fw(2);
+        check_count(usb_txn, 0, "FT245 bytes sent without link");
 
         report "--- DS1302";
         rtc_check(X"81", X"45", "read seconds");

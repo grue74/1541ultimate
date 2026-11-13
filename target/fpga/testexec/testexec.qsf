@@ -498,6 +498,7 @@ set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/all_ca
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/ide64_ata_pkg.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/ide64_ata.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/ide64_rtc.vhd
+set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/ide64_usb.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/cart_slot_pkg.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/cart_slot_registers.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/freezer.vhd

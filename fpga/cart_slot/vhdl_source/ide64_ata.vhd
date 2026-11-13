@@ -94,6 +94,21 @@ architecture gideon of ide64_ata is
     signal rtc_wr_time  : std_logic;
     signal rtc_wr_ram   : std_logic;
     signal rtc_ack      : std_logic := '0';
+
+    -- FT245 (PCLink)
+    signal slot_resp_ata: t_slot_resp;
+    signal slot_resp_usb: t_slot_resp;
+    signal usb_reg_en   : std_logic;
+    signal usb_ram_en   : std_logic;
+    signal usb_rdata    : std_logic_vector(7 downto 0);
+    signal usb_ack      : std_logic;
+
+    -- CPU address decode (offsets in the 8K window)
+    signal sel_regs     : std_logic; -- $000-$0FF
+    signal sel_rtc      : std_logic; -- $100-$13F
+    signal sel_usb      : std_logic; -- $140-$17F
+    signal sel_buf      : std_logic; -- $200-$3FF
+    signal sel_usb_ram  : std_logic; -- $400-$5FF
     signal c64_reset_d  : std_logic := '0';
 
     -- derived
@@ -173,28 +188,55 @@ begin
         end if;
     end process;
 
+    sel_regs    <= '1' when io_req.address(10 downto 8) = "000" else '0';
+    sel_rtc     <= '1' when io_req.address(10 downto 6) = "00100" else '0';
+    sel_usb     <= '1' when io_req.address(10 downto 6) = "00101" else '0';
+    sel_buf     <= '1' when io_req.address(10 downto 9) = "01" else '0';
+    sel_usb_ram <= '1' when io_req.address(10 downto 9) = "10" else '0';
+
+    slot_resp <= or_reduce(slot_resp_ata & slot_resp_usb);
+
     process(slot_req, active, reg_rdata, in_hi, rtc_active, rtc_rbit)
     begin
-        slot_resp <= c_slot_resp_init;
+        slot_resp_ata <= c_slot_resp_init;
         if active='1' then
             if slot_req.bus_address(8 downto 4) = "00010" then -- DE20-DE2F
-                slot_resp.data <= reg_rdata;
-                slot_resp.reg_output <= '1';
+                slot_resp_ata.data <= reg_rdata;
+                slot_resp_ata.reg_output <= '1';
             elsif slot_req.bus_address(8 downto 0) = "000110001" then -- DE31
-                slot_resp.data <= in_hi;
-                slot_resp.reg_output <= '1';
+                slot_resp_ata.data <= in_hi;
+                slot_resp_ata.reg_output <= '1';
             end if;
         end if;
         if rtc_active='1' and slot_req.bus_address(8 downto 0) = "001011111" then -- DE5F: DS1302 data in bit 0
-            slot_resp.data <= "0000000" & rtc_rbit;
-            slot_resp.reg_output <= '1';
+            slot_resp_ata.data <= "0000000" & rtc_rbit;
+            slot_resp_ata.reg_output <= '1';
         end if;
     end process;
 
     -- DS1302 at DE5F. Every access is one SCLK pulse; it stops responding when the cart is killed.
     rtc_active <= active and not killed;
     rtc_strobe <= rtc_active and (slot_req.io_read or slot_req.io_write) when slot_req.io_address(8 downto 0) = "001011111" else '0';
-    rtc_cpu_en <= (io_req.read or io_req.write) when io_req.address(9 downto 8) = "01" else '0';
+    rtc_cpu_en <= (io_req.read or io_req.write) and sel_rtc;
+
+    -- FT245 USB FIFO at DE5D/DE5E (PCLink)
+    usb_reg_en <= (io_req.read or io_req.write) and sel_usb;
+    usb_ram_en <= (io_req.read or io_req.write) and sel_usb_ram;
+
+    i_usb: entity work.ide64_usb
+    port map (
+        clock           => clock,
+        reset           => reset,
+        active          => active,
+        slot_req        => slot_req,
+        slot_resp       => slot_resp_usb,
+        reg_en          => usb_reg_en,
+        ram_en          => usb_ram_en,
+        cpu_we          => io_req.write,
+        cpu_addr        => io_req.address(8 downto 0),
+        cpu_wdata       => io_req.data,
+        cpu_rdata       => usb_rdata,
+        cpu_ack         => usb_ack );
 
     i_rtc: entity work.ide64_rtc
     port map (
@@ -316,7 +358,7 @@ begin
                 ev_rtc_ram <= '1';
             end if;
 
-            if io_req.address(9 downto 8)="00" then
+            if sel_regs='1' then
                 if io_req.write='1' then
                     regs_resp.ack <= '1';
                     if ev_reset='0' then -- completions are dropped until the reset is acknowledged
@@ -424,13 +466,13 @@ begin
     end process;
 
     -- CPU access to the sector buffer: offsets $200-$3FF, address bit 0 selects the RAM
-    buf_en_lo <= (io_req.read or io_req.write) and io_req.address(9) and not io_req.address(0);
-    buf_en_hi <= (io_req.read or io_req.write) and io_req.address(9) and io_req.address(0);
+    buf_en_lo <= (io_req.read or io_req.write) and sel_buf and not io_req.address(0);
+    buf_en_hi <= (io_req.read or io_req.write) and sel_buf and io_req.address(0);
 
     process(clock)
     begin
         if rising_edge(clock) then
-            buf_ack <= (io_req.read or io_req.write) and io_req.address(9);
+            buf_ack <= (io_req.read or io_req.write) and sel_buf;
             buf_odd <= io_req.address(0);
             rtc_ack <= rtc_cpu_en;
 
@@ -446,8 +488,9 @@ begin
     -- Port B reads the word at the pointer, except for the clock that writes a C64 data word
     buf_b_addr <= wr_addr when wr_pend='1' else ptr;
 
-    io_resp.ack  <= regs_resp.ack or buf_ack or rtc_ack;
-    io_resp.data <= rtc_rdata when rtc_ack='1' else
+    io_resp.ack  <= regs_resp.ack or buf_ack or rtc_ack or usb_ack;
+    io_resp.data <= usb_rdata when usb_ack='1' else
+                    rtc_rdata when rtc_ack='1' else
                     regs_resp.data when buf_ack='0' else
                     buf_a_hi when buf_odd='1' else
                     buf_a_lo;

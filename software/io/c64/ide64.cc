@@ -137,6 +137,7 @@ Ide64 :: Ide64()
     buffer = (volatile uint8_t *)(IDE64_BASE + IDE64_BUFFER_OFFSET);
     taskHandle = NULL;
     present_mask = 0;
+    abort_request = false;
     available = true;
     mutex = xSemaphoreCreateMutex();
 
@@ -205,19 +206,39 @@ void Ide64 :: run(void)
     }
 }
 
-// Wait until one of the events in mask (or a reset) is pending. Returns the events.
-// A pending reset is left for the main loop to acknowledge.
-uint8_t Ide64 :: wait_event(uint8_t mask)
+// Wait until the C64 has drained or filled the buffer. Returns false if the command
+// must stop: on a reset (left pending for the main loop) or when mount/unmount asks
+// for the drive (the command then ends with ABRT). The C64 may be frozen by the menu,
+// so this wait can't be allowed to block a mount.
+bool Ide64 :: wait_buffer(void)
 {
-    mask |= IDE64_EV_RESET;
     for (;;) {
         uint8_t ev = regs->events;
-        if (ev & mask) {
-            return ev;
+        if (ev & IDE64_EV_RESET) {
+            return false;
+        }
+        if (ev & IDE64_EV_BUF) {
+            regs->events = IDE64_EV_BUF;
+            return true;
+        }
+        if (abort_request) {
+            complete(ATA_ERR_ABRT);
+            return false;
         }
         write_present();
         ulTaskNotifyTake(pdTRUE, 1000);
     }
+}
+
+// Get the drive from the task, ending a command that waits for the C64
+void Ide64 :: lock_drive(void)
+{
+    abort_request = true;
+    if (taskHandle) {
+        xTaskNotifyGive(taskHandle);
+    }
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    abort_request = false;
 }
 
 void Ide64 :: copy_to_fpga(const uint8_t *src)
@@ -321,11 +342,9 @@ void Ide64 :: execute(uint8_t command)
         regs->error = 0;
         regs->status = ATA_STAT_DRDY;
         regs->control = IDE64_CTRL_ARM | IDE64_CTRL_DATA_OUT;
-        if (wait_event(IDE64_EV_BUF) & IDE64_EV_RESET) {
-            return;
+        if (wait_buffer()) {
+            complete(0);
         }
-        regs->events = IDE64_EV_BUF;
-        complete(0);
         break;
     case 0x98: case 0xE5: // CHECK POWER MODE: active
         regs->nsect = 0xFF;
@@ -378,10 +397,9 @@ void Ide64 :: cmd_read(void)
         regs->status = ATA_STAT_DRDY;
         if (k < count - 1) {
             regs->control = IDE64_CTRL_ARM | IDE64_CTRL_MORE;
-            if (wait_event(IDE64_EV_BUF) & IDE64_EV_RESET) {
+            if (!wait_buffer()) {
                 return;
             }
-            regs->events = IDE64_EV_BUF;
         } else {
             regs->control = IDE64_CTRL_ARM;
         }
@@ -415,11 +433,10 @@ void Ide64 :: cmd_write(void)
         regs->error = 0;
         regs->status = ATA_STAT_DRDY;
         regs->control = IDE64_CTRL_ARM | IDE64_CTRL_DATA_OUT;
-        if (wait_event(IDE64_EV_BUF) & IDE64_EV_RESET) {
+        if (!wait_buffer()) {
             drive.file->sync();
             return;
         }
-        regs->events = IDE64_EV_BUF;
         copy_from_fpga(sector_data);
         if ((drive.file->write(sector_data, 512, &transferred) != FR_OK) || (transferred != 512)) {
             set_command_block(lba);
@@ -590,7 +607,7 @@ FRESULT Ide64 :: mount(const char *path, const char *filename)
 
     unmount();
 
-    xSemaphoreTake(mutex, portMAX_DELAY);
+    lock_drive();
     drive.file = f;
     drive.name = full;
     drive.readonly = readonly;
@@ -615,7 +632,7 @@ void Ide64 :: set_startup_image(const char *fullpath)
 
 void Ide64 :: unmount(void)
 {
-    xSemaphoreTake(mutex, portMAX_DELAY);
+    lock_drive();
     present_mask &= ~0x01;
     write_present();
     if (drive.file) {

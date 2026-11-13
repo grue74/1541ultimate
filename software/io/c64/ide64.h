@@ -83,6 +83,7 @@ class Ide64 : public ConfigurableObject
     TaskHandle_t taskHandle;
     SemaphoreHandle_t mutex;
     uint8_t present_mask;
+    volatile bool abort_request; // mount/unmount wants the drive
     bool available;
     Ide64Drive drive; // interface 0, master
 
@@ -91,7 +92,8 @@ class Ide64 : public ConfigurableObject
     static void task(void *a);
     static uint8_t irq(void *context);
     void run(void);
-    uint8_t wait_event(uint8_t mask);
+    bool wait_buffer(void);
+    void lock_drive(void);
     void execute(uint8_t command);
     void complete(uint8_t error);
     bool get_lba(uint32_t &lba);

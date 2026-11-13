@@ -193,6 +193,11 @@ void Ide64 :: run(void)
         if (ev & IDE64_EV_RESET) {
             regs->events = IDE64_EV_RESET;
             drive.reset_translation();
+            if (regs->events & IDE64_EV_RESET) {
+                // Still pending right after the acknowledge: don't let a reset that
+                // keeps firing starve the lower priority tasks.
+                vTaskDelay(10);
+            }
         }
         if (ev & IDE64_EV_BUF) { // stray, nothing waits for it here
             regs->events = IDE64_EV_BUF;

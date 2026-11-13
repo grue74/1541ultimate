@@ -85,6 +85,7 @@ architecture tb of tb_ide64 is
     signal io_irq           : std_logic;
     signal fw_slow          : boolean := false; -- firmware model takes 30 us per step
     signal fw_writes        : natural := 0;     -- sectors received by WRITE SECTORS
+    signal fw_resets        : natural := 0;     -- reset events acknowledged by the firmware model
 
     -- memory
     signal mem_req          : std_logic;
@@ -376,6 +377,7 @@ begin
             wait_event(v_ev);
             if v_ev(c_ide_ev_reset) = '1' then
                 io_wr(to_integer(c_ide_events), X"04");
+                fw_resets <= fw_resets + 1;
             elsif v_ev(c_ide_ev_cmd) = '1' then
                 io_wr(to_integer(c_ide_events), X"01");
                 io_rd(to_integer(c_ide_command), v_cmd);
@@ -816,6 +818,22 @@ begin
         c64_reset_pulse;
         check(X"DE32", X"22", "status after reset");
         check(X"DE60", rom_byte(16#1E60#), "ROM window after reset");
+
+        report "--- ATA: C64 reset held for 50 us raises one event";
+        v_n := fw_resets;
+        wait until rising_edge(clock);
+        c64_reset <= '1';
+        wait for 50 us;
+        wait until rising_edge(clock);
+        c64_reset <= '0';
+        wait for 5 us;
+        if fw_resets - v_n /= 1 then
+            report "FAIL C64 reset: firmware saw " & integer'image(fw_resets - v_n) & " reset events, expected 1" severity error;
+            v_err := v_err + 1;
+        else
+            report "ok   C64 reset: firmware saw 1 reset event";
+        end if;
+        check(X"DE27", X"40", "status after C64 reset");
 
         ------------------------------------------------------------------ V4.2
         report "--- V4.2";

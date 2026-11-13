@@ -80,6 +80,7 @@ architecture gideon of ide64_ata is
     signal ev_cmd       : std_logic := '0';
     signal ev_buf       : std_logic := '0';
     signal ev_reset     : std_logic := '0';
+    signal c64_reset_d  : std_logic := '0';
 
     -- derived
     signal bsy_eff      : std_logic;
@@ -329,8 +330,12 @@ begin
             end if;
 
             ---------------------------------------------------------------
-            -- Resets: SRST (1 -> 0 edge of device control bit 2), C64 reset
+            -- Resets: SRST (1 -> 0 edge of device control bit 2), C64 reset.
+            -- The state is held in reset while the C64 reset is active; the
+            -- event is raised once, when it is released (a level event would
+            -- interrupt the CPU continuously while the C64 is held in reset).
             ---------------------------------------------------------------
+            c64_reset_d <= c64_reset;
             if v_srst or c64_reset='1' or reset='1' then
                 -- drive_diag() signature
                 error       <= X"01";
@@ -346,6 +351,8 @@ begin
                 ptr         <= (others => '0');
                 ev_cmd      <= '0';
                 ev_buf      <= '0';
+            end if;
+            if v_srst or (c64_reset_d='1' and c64_reset='0') then
                 ev_reset    <= '1';
             end if;
             if c64_reset='1' or reset='1' then

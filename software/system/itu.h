@@ -42,6 +42,7 @@ extern "C" {
 #define ITU_IRQHIGH_1581     1
 #define ITU_IRQHIGH_WIFI     3
 #define ITU_IRQHIGH_BLING    4
+#define ITU_IRQHIGH_IDE64    4 // shared with bling, which has no handler
 #define ITU_IRQHIGH_HDMI     5
 #define ITU_IRQHIGH_UNLOCK   6
 #define ITU_IRQHIGH_GURU     7

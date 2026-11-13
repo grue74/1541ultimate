@@ -62,6 +62,7 @@ SRCS_CC	 =  u2p_init.cc \
 			rtc_i2c.cc \
 			c64.cc \
 			c64_crt.cc \
+			ide64.cc \
 			c64_subsys.cc \
 			x00_wrapper.cc \
 			screen.cc \
@@ -116,6 +117,7 @@ SRCS_CC	 =  u2p_init.cc \
 			filetype_u2p.cc \
 			filetype_reu.cc \
 			filetype_crt.cc \
+			filetype_ide64.cc \
 			filetype_sid.cc \
 			filetype_bin.cc \
 			filetype_cfg.cc \

@@ -73,6 +73,7 @@ SRCS_CC	 =  u64ii_init.cc \
 			c64.cc \
 			joystick_output.cc \
 			c64_crt.cc \
+			ide64.cc \
 			u64_machine.cc \
 			u64_memory_backend.cc \
 			c64_subsys.cc \
@@ -130,6 +131,7 @@ SRCS_CC	 =  u64ii_init.cc \
 			filetype_u2p.cc \
 			filetype_reu.cc \
 			filetype_crt.cc \
+			filetype_ide64.cc \
 			filetype_sid.cc \
 			filetype_bin.cc \
 			filetype_cfg.cc \

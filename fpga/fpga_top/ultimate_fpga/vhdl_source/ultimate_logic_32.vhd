@@ -473,6 +473,8 @@ architecture logic of ultimate_logic_32 is
     signal sys_irq_iec      : std_logic := '0';
     signal sys_irq_cmdif    : std_logic := '0';
     signal sys_irq_acia     : std_logic := '0';
+    signal sys_irq_ide64    : std_logic := '0';
+    signal sys_irq_high4    : std_logic := '0';
     signal sys_irq_wifi     : std_logic := '0';
     signal sys_irq_eth_tx   : std_logic := '0';
     signal sys_irq_eth_rx   : std_logic := '0';
@@ -498,6 +500,9 @@ begin
 
     c64_reset_in <= not c64_reset_in_n;
     
+    -- The firmware installs no bling handler; IDE64 shares the line (ITU_IRQHIGH_IDE64).
+    sys_irq_high4 <= bling_irq or sys_irq_ide64;
+
     i_itu: entity work.itu
     generic map (
 		g_version	    => g_version,
@@ -525,7 +530,7 @@ begin
         irq_high(1) => sys_irq_1541_1,
         irq_high(2) => sys_irq_1541_2,
         irq_high(3) => sys_irq_wifi,
-        irq_high(4) => bling_irq,
+        irq_high(4) => sys_irq_high4, -- bling, shared with IDE64
         irq_high(5) => hdmi_irq,
         irq_high(6) => unlock_irq,
         irq_high(7) => guru_irq,
@@ -957,7 +962,8 @@ begin
             io_req          => io_req_cart,
             io_resp         => io_resp_cart,
             io_irq_cmd      => sys_irq_cmdif,
-            io_irq_acia     => sys_irq_acia );
+            io_irq_acia     => sys_irq_acia,
+            io_irq_ide64    => sys_irq_ide64 );
 
         dman_o <= dman_oi;
     end generate;

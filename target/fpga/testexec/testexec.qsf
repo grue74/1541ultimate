@@ -495,6 +495,8 @@ set_global_assignment -name VHDL_FILE "../../../fpga/altera/srl_fifo-altera.vhd"
 set_global_assignment -name VHDL_FILE ../../../fpga/altera/u2p_io.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/altera/update_io.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/all_carts_v5.vhd
+set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/ide64_ata_pkg.vhd
+set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/ide64_ata.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/cart_slot_pkg.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/cart_slot_registers.vhd
 set_global_assignment -name VHDL_FILE ../../../fpga/cart_slot/vhdl_source/freezer.vhd

@@ -130,7 +130,8 @@ port (
     io_req          : in    t_io_req;
     io_resp         : out   t_io_resp;
     io_irq_cmd      : out   std_logic;
-    io_irq_acia     : out   std_logic );
+    io_irq_acia     : out   std_logic;
+    io_irq_ide64    : out   std_logic := '0' );
 
 end slot_server_v4;    
 
@@ -245,6 +246,7 @@ architecture structural of slot_server_v4 is
     signal serve_io1       : std_logic := '0'; -- IO1n
     signal serve_io2       : std_logic := '0'; -- IO2n
     signal serve_ultimax   : std_logic := '0'; -- IDE64: ultimax 1000-7FFF / A000-BFFF
+    signal ide64_active    : std_logic := '0'; -- IDE64: the ATA device owns DE20-DE2F/DE31
     signal allow_write     : std_logic := '0';
 
     -- timing measurement
@@ -298,6 +300,8 @@ architecture structural of slot_server_v4 is
     signal io_resp_acia     : t_io_resp := c_io_resp_init;
     signal io_req_eeprom    : t_io_req;
     signal io_resp_eeprom   : t_io_resp := c_io_resp_init;
+    signal io_req_ide64     : t_io_req;
+    signal io_resp_ide64    : t_io_resp := c_io_resp_init;
     
     signal dma_req_io       : t_dma_req;
     signal dma_resp_io      : t_dma_resp := c_dma_resp_init;
@@ -317,6 +321,7 @@ architecture structural of slot_server_v4 is
     signal slot_resp_cmd    : t_slot_resp := c_slot_resp_init;
     signal slot_resp_samp   : t_slot_resp := c_slot_resp_init;
     signal slot_resp_acia   : t_slot_resp := c_slot_resp_init;
+    signal slot_resp_ide64  : t_slot_resp := c_slot_resp_init;
     
     signal mem_req_reu      : t_mem_req   := c_mem_req_init; 
     signal mem_resp_reu     : t_mem_resp  := c_mem_resp_init;
@@ -483,7 +488,7 @@ begin
     generic map (
         g_range_lo  => 13,
         g_range_hi  => 15,
-        g_ports     => 7 )
+        g_ports     => 8 )
     port map (
         clock    => clock,
         
@@ -497,6 +502,7 @@ begin
         reqs(4)  => io_req_samp_cpu, -- 4048000
         reqs(5)  => io_req_acia,     -- 404A000
         reqs(6)  => io_req_eeprom,   -- 404C000
+        reqs(7)  => io_req_ide64,    -- 404E000
         
         resps(0) => io_resp_regs,
         resps(1) => io_resp_sid,
@@ -504,7 +510,8 @@ begin
         resps(3) => io_resp_copper,
         resps(4) => io_resp_samp_cpu,
         resps(5) => io_resp_acia,
-        resps(6) => io_resp_eeprom );
+        resps(6) => io_resp_eeprom,
+        resps(7) => io_resp_ide64 );
 
 
     i_registers: entity work.cart_slot_registers
@@ -800,6 +807,7 @@ begin
         serve_io1       => serve_io1, -- IO1n
         serve_io2       => serve_io2, -- IO2n
         serve_ultimax   => serve_ultimax,
+        ide64_active    => ide64_active,
         allow_write     => allow_write,
         kernal_area     => kernal_area,
         kernal_enable   => control.kernal_enable,
@@ -1046,8 +1054,32 @@ begin
         
     end generate;
 
+    r_ide64: if g_ide64 generate
+        i_ide64: entity work.ide64_ata
+        port map (
+            clock     => clock,
+            reset     => reset,
+            c64_reset => actual_c64_reset,
+            active    => ide64_active,
+            slot_req  => slot_req,
+            slot_resp => slot_resp_ide64,
+            io_req    => io_req_ide64,
+            io_resp   => io_resp_ide64,
+            io_irq    => io_irq_ide64
+        );
+    end generate;
+
+    r_no_ide64: if not g_ide64 generate
+        i_dummy: entity work.io_dummy
+        port map (
+            clock   => clock,
+            io_req  => io_req_ide64,
+            io_resp => io_resp_ide64
+        );
+    end generate;
+
     slot_resp <= or_reduce(slot_resp_reu & slot_resp_cart & slot_resp_sid & slot_resp_cmd &
-                           slot_resp_samp & slot_resp_acia);
+                           slot_resp_samp & slot_resp_acia & slot_resp_ide64);
 
     p_probe_end_delay: process(clock)
         constant c_probe_time : natural := ((g_clock_freq + 5_000_000) / 10_000_000);

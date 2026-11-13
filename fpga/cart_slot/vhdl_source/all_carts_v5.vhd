@@ -51,6 +51,7 @@ port (
     serve_io1       : out std_logic; -- IO1n
     serve_io2       : out std_logic; -- IO2n
     serve_ultimax   : out std_logic := '0'; -- serve 1000-7FFF and A000-BFFF in ultimax (PHI2 only)
+    ide64_active    : out std_logic := '0'; -- IDE64 selected and enabled: the ATA device (ide64_ata) owns DE20-DE2F/DE31
     allow_write     : out std_logic;
 
     mem_req         : in  std_logic; -- if '1', the address shouldn't change
@@ -82,7 +83,6 @@ architecture gideon of all_carts_v5 is
     signal ide_cfg      : std_logic_vector(1 downto 0) := "00"; -- 0=8K, 1=16K, 2=off, 3=ultimax
     signal ide_kill     : std_logic := '0'; -- $DEFB bit 0: ROM window, RTC and config writes disabled until reset
     signal ide_ce       : std_logic := '0'; -- $DEFB bit 1: DS1302 CE line
-    signal ide_bus      : std_logic_vector(15 downto 0) := (others => '0'); -- IDE bus latch (no drive attached)
     
     signal freeze_act_d : std_logic;
     signal cart_en      : std_logic;
@@ -163,6 +163,7 @@ begin
 
 
     serve_enable <= cart_en or kernal_enable;
+    ide64_active <= cart_en when g_ide64 and cart_logic_d = c_ide64 else '0';
     cart_active  <= cart_en;
 
     slot_addr <= std_logic_vector(slot_req.bus_address);
@@ -495,14 +496,7 @@ begin
 
             when c_ide64 =>
                 if g_ide64 then
-                    -- IDE bus latch. Placeholder for the ATA block: with no drive attached,
-                    -- reads return what was last put on the bus (as VICE does).
-                    if io_write='1' and io_addr(8 downto 4) = "00010" then -- DE20-DE2F
-                        ide_bus(7 downto 0) <= io_wdata;
-                    end if;
-                    if io_write='1' and io_addr(8 downto 0) = "000110001" then -- DE31: high byte of the next 16-bit write
-                        ide_bus(15 downto 8) <= io_wdata;
-                    end if;
+                    -- The IDE bus (DE20-DE2F, DE31) is served by ide64_ata.
 
                     -- ROM window registers DE60-DEFF; ignored once killed
                     if io_write='1' and io_addr(8)='0' and ide_kill='0' then
@@ -863,7 +857,7 @@ begin
 --    
 --    slot_resp.reg_output <= '1' when (slot_addr(8 downto 1)="00000000") and (cart_logic_d = c_action) and (variant(0)='1') else '0';
 
-    process(bank_bits, mode_bits, allow_bank, cart_logic_d, variant, slot_addr, ee_rdata, ide_cfg, ide_bus)
+    process(bank_bits, mode_bits, allow_bank, cart_logic_d, variant, slot_addr, ee_rdata, ide_cfg)
     begin
         slot_resp <= c_slot_resp_init;
         
@@ -890,14 +884,9 @@ begin
             end if;
 
         when c_ide64 =>
+            -- DE20-DE2F and DE31 are served by ide64_ata
             if g_ide64 and slot_addr(8)='0' then -- DExx
-                if slot_addr(7 downto 4) = X"2" then -- DE20-DE2F: IDE bus (no drive: last bus value)
-                    slot_resp.data <= ide_bus(7 downto 0);
-                    slot_resp.reg_output <= '1';
-                elsif slot_addr(7 downto 0) = X"31" then -- high byte of the last 16-bit read
-                    slot_resp.data <= ide_bus(15 downto 8);
-                    slot_resp.reg_output <= '1';
-                elsif slot_addr(7 downto 0) = X"32" then -- ID | bank << 2 | ((cfg & 1) ^ 1) << 1 | cfg >> 1
+                if slot_addr(7 downto 0) = X"32" then -- ID | bank << 2 | ((cfg & 1) ^ 1) << 1 | cfg >> 1
                     if variant(1)='1' then -- V4.2: ID $80, 5-bit bank
                         slot_resp.data(7 downto 2) <= '1' & bank_bits(18 downto 14);
                     else                   -- V4.1: ID $20, 3-bit bank

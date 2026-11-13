@@ -6,6 +6,9 @@
 --              model (CPU cycles in PHI2, simplified PLA) and a memory model
 --              holding the cart ROM and RAM. Checks modes, banking, the
 --              $DExx registers, ultimax RAM serving and the kill port.
+--              The ATA device (ide64_ata) is driven by a firmware model on
+--              its io_bus: IDENTIFY, READ/WRITE SECTORS, absent devices,
+--              BSY behaviour and SRST.
 -------------------------------------------------------------------------------
 
 library ieee;
@@ -13,6 +16,7 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 use work.io_bus_pkg.all;
 use work.slot_bus_pkg.all;
+use work.ide64_ata_pkg.all;
 
 entity tb_ide64 is
 end entity;
@@ -52,6 +56,8 @@ architecture tb of tb_ide64 is
     signal do_io_event      : std_logic;
     signal slot_req         : t_slot_req;
     signal slot_resp        : t_slot_resp;
+    signal slot_resp_cart   : t_slot_resp;
+    signal slot_resp_ide    : t_slot_resp;
     signal epyx_timeout     : std_logic;
     signal kernal_area      : std_logic;
 
@@ -71,6 +77,14 @@ architecture tb of tb_ide64 is
     signal allow_write      : std_logic;
     signal game_n           : std_logic;
     signal exrom_n          : std_logic;
+    signal ide64_active     : std_logic;
+
+    -- ATA device, CPU side
+    signal io_req           : t_io_req := c_io_req_init;
+    signal io_resp          : t_io_resp;
+    signal io_irq           : std_logic;
+    signal fw_slow          : boolean := false; -- firmware model takes 30 us per step
+    signal fw_writes        : natural := 0;     -- sectors received by WRITE SECTORS
 
     -- memory
     signal mem_req          : std_logic;
@@ -83,11 +97,18 @@ architecture tb of tb_ide64 is
 
     type t_ram is array(natural range <>) of std_logic_vector(7 downto 0);
     shared variable ram     : t_ram(0 to 65535) := (others => X"00");
+    shared variable wbuf    : t_ram(0 to 511) := (others => X"00"); -- last sector written by the C64
     signal errors           : natural := 0;
 
     function rom_byte(i : natural) return std_logic_vector is
     begin
         return std_logic_vector(to_unsigned(((i mod 251) + 37 * (i / 16384)) mod 256, 8));
+    end function;
+
+    -- sector contents served by the firmware model (IDENTIFY uses lba 1000)
+    function sec_byte(lba, i : natural) return std_logic_vector is
+    begin
+        return std_logic_vector(to_unsigned((lba * 13 + i * 3 + i / 256) mod 256, 8));
     end function;
 
     function hex(v : std_logic_vector) return string is
@@ -254,7 +275,7 @@ begin
         cart_variant    => cart_variant,
         cart_force      => '0',
         slot_req        => slot_req,
-        slot_resp       => slot_resp,
+        slot_resp       => slot_resp_cart,
         epyx_timeout    => epyx_timeout,
         serve_enable    => serve_enable,
         serve_vic       => serve_vic,
@@ -263,6 +284,7 @@ begin
         serve_io1       => serve_io1,
         serve_io2       => serve_io2,
         serve_ultimax   => serve_ultimax,
+        ide64_active    => ide64_active,
         allow_write     => allow_write,
         mem_req         => mem_req,
         mem_addr        => mem_addr,
@@ -272,6 +294,149 @@ begin
         exrom_n         => exrom_n,
         game_n          => game_n,
         CART_LEDn       => open );
+
+    i_ata: entity work.ide64_ata
+    port map (
+        clock           => clock,
+        reset           => reset,
+        c64_reset       => c64_reset,
+        active          => ide64_active,
+        slot_req        => slot_req,
+        slot_resp       => slot_resp_ide,
+        io_req          => io_req,
+        io_resp         => io_resp,
+        io_irq          => io_irq );
+
+    slot_resp <= or_reduce(slot_resp_cart & slot_resp_ide);
+
+    ---------------------------------------------------------------------------
+    -- Firmware model: serves the ATA device through its io_bus, the way the
+    -- real driver does (event -> buffer -> status -> control).
+    ---------------------------------------------------------------------------
+    p_fw: process
+        variable v_ev   : std_logic_vector(7 downto 0);
+        variable v_cmd  : std_logic_vector(7 downto 0);
+        variable v_n    : natural;
+        variable v_lba  : natural;
+        variable v_d    : std_logic_vector(7 downto 0);
+        variable v_abort: boolean;
+
+        procedure io_wr(a : natural; d : std_logic_vector(7 downto 0)) is
+        begin
+            io_req.address <= to_unsigned(a, 24);
+            io_req.data    <= d;
+            io_req.write   <= '1';
+            wait until rising_edge(clock);
+            io_req.write   <= '0';
+            loop
+                wait until rising_edge(clock);
+                exit when io_resp.ack = '1';
+            end loop;
+        end procedure;
+
+        procedure io_rd(a : natural; d : out std_logic_vector(7 downto 0)) is
+        begin
+            io_req.address <= to_unsigned(a, 24);
+            io_req.read    <= '1';
+            wait until rising_edge(clock);
+            io_req.read    <= '0';
+            loop
+                wait until rising_edge(clock);
+                exit when io_resp.ack = '1';
+            end loop;
+            d := io_resp.data;
+        end procedure;
+
+        procedure fill(lba : natural) is
+        begin
+            for i in 0 to 511 loop
+                io_wr(16#200# + i, sec_byte(lba, i));
+            end loop;
+        end procedure;
+
+        procedure wait_event(ev : out std_logic_vector(7 downto 0)) is
+        begin
+            if io_irq /= '1' then
+                wait until io_irq = '1';
+            end if;
+            io_rd(to_integer(c_ide_events), ev);
+        end procedure;
+
+        procedure step_delay is
+        begin
+            if fw_slow then
+                wait for 30 us;
+            end if;
+        end procedure;
+    begin
+        wait until reset = '0';
+        wait for 100 ns;
+        io_wr(to_integer(c_ide_present), X"81"); -- interface 0 master, IRQ on
+        loop
+            wait_event(v_ev);
+            if v_ev(c_ide_ev_reset) = '1' then
+                io_wr(to_integer(c_ide_events), X"04");
+            elsif v_ev(c_ide_ev_cmd) = '1' then
+                io_wr(to_integer(c_ide_events), X"01");
+                io_rd(to_integer(c_ide_command), v_cmd);
+                case v_cmd is
+                when X"EC" => -- IDENTIFY DEVICE
+                    fill(1000);
+                    step_delay;
+                    io_wr(to_integer(c_ide_status), X"40");
+                    io_wr(to_integer(c_ide_control), X"01");
+
+                when X"20" => -- READ SECTORS (LBA low byte only)
+                    io_rd(to_integer(c_ide_nsect), v_d);
+                    v_n := to_integer(unsigned(v_d));
+                    io_rd(to_integer(c_ide_sector), v_d);
+                    v_lba := to_integer(unsigned(v_d));
+                    v_abort := false;
+                    for k in 0 to v_n - 1 loop
+                        fill(v_lba + k);
+                        step_delay;
+                        io_wr(to_integer(c_ide_status), X"40");
+                        if k < v_n - 1 then
+                            io_wr(to_integer(c_ide_control), X"05"); -- more sectors follow
+                            wait_event(v_ev);
+                            if v_ev(c_ide_ev_reset) = '1' then
+                                io_wr(to_integer(c_ide_events), X"04");
+                                v_abort := true;
+                            else
+                                io_wr(to_integer(c_ide_events), X"02");
+                            end if;
+                        else
+                            io_wr(to_integer(c_ide_control), X"01");
+                        end if;
+                        exit when v_abort;
+                    end loop;
+
+                when X"30" => -- WRITE SECTORS (one sector)
+                    io_wr(to_integer(c_ide_status), X"40");
+                    io_wr(to_integer(c_ide_control), X"03");
+                    wait_event(v_ev);
+                    if v_ev(c_ide_ev_reset) = '1' then
+                        io_wr(to_integer(c_ide_events), X"04");
+                    else
+                        io_wr(to_integer(c_ide_events), X"02");
+                        for i in 0 to 511 loop
+                            io_rd(16#200# + i, v_d);
+                            io_rd(16#200# + i, v_d);
+                            wbuf(i) := v_d;
+                        end loop;
+                        fw_writes <= fw_writes + 1;
+                        io_wr(to_integer(c_ide_status), X"40");
+                        io_wr(to_integer(c_ide_control), X"00");
+                    end if;
+
+                when others => -- abort
+                    io_wr(to_integer(c_ide_error), X"04");
+                    io_wr(to_integer(c_ide_status), X"41");
+                    io_wr(to_integer(c_ide_control), X"00");
+                end case;
+            end if;
+        end loop;
+    end process;
 
     ---------------------------------------------------------------------------
     -- Memory model: ROM at c_rom_base (rom_byte), 64K RAM at c_ram_base
@@ -327,8 +492,10 @@ begin
         -- one CPU cycle (PHI2 high); returns what was on the bus at the end of PHI2
         procedure cycle(a : unsigned(15 downto 0); rw : std_logic; wd : std_logic_vector(7 downto 0);
                         rd : out std_logic_vector(7 downto 0); driven : out boolean) is
+            variable t0 : time;
         begin
             wait until PHI2 = '1';
+            t0 := now;
             wait for 10 ns;
             ADDRESS <= a;
             RWn     <= rw;
@@ -337,7 +504,8 @@ begin
                 cpu_wdata <= wd;
                 cpu_drive <= true;
             end if;
-            wait until PHI2 = '0' for c_half_period - 30 ns;
+            -- sample just before the end of PHI2 (a write must not run into the next cycle)
+            wait for (c_half_period - 30 ns) - (now - t0);
             rd     := bus_data;
             driven := data_t = '1';
             wait until PHI2 = '0';
@@ -410,6 +578,51 @@ begin
             c64_reset <= '0';
         end procedure;
 
+        procedure rd_reg(a : unsigned(15 downto 0); d : out std_logic_vector(7 downto 0)) is
+            variable dr : boolean;
+        begin
+            cycle(a, '1', X"00", d, dr);
+        end procedure;
+
+        -- poll $DE27 until it reads exp (up to 200 reads)
+        procedure wait_status(exp : std_logic_vector(7 downto 0); msg : string) is
+            variable d : std_logic_vector(7 downto 0);
+        begin
+            for i in 1 to 200 loop
+                rd_reg(X"DE27", d);
+                if d = exp then
+                    report "ok   " & msg & ": status $" & hex(d) & " after " & integer'image(i) & " polls";
+                    return;
+                end if;
+            end loop;
+            report "FAIL " & msg & ": status $" & hex(d) & ", expected $" & hex(exp) severity error;
+            v_err := v_err + 1;
+        end procedure;
+
+        -- read 256 words through $DE20/$DE31 and compare with sec_byte(lba)
+        procedure read_sector(lba : natural; msg : string) is
+            variable lo, hi : std_logic_vector(7 downto 0);
+            variable bad    : natural := 0;
+        begin
+            for i in 0 to 255 loop
+                rd_reg(X"DE20", lo);
+                rd_reg(X"DE31", hi);
+                if lo /= sec_byte(lba, 2 * i) or hi /= sec_byte(lba, 2 * i + 1) then
+                    if bad < 4 then
+                        report "FAIL " & msg & ": word " & integer'image(i) & " = $" & hex(hi) & hex(lo) &
+                               ", expected $" & hex(sec_byte(lba, 2 * i + 1)) & hex(sec_byte(lba, 2 * i)) severity error;
+                    end if;
+                    bad := bad + 1;
+                end if;
+            end loop;
+            if bad = 0 then
+                report "ok   " & msg & ": 256 words";
+            else
+                v_err := v_err + 1;
+            end if;
+        end procedure;
+
+        variable v_n : natural;
         constant c_b3 : natural := 3 * 16384;
     begin
         reset <= '1';
@@ -442,11 +655,115 @@ begin
         wr(X"DE6F", X"00"); -- V4.1: DE68-DE7F do nothing
         check(X"DE32", X"2E", "DE6F ignored on V4.1");
 
-        report "--- IDE bus latch";
+        report "--- IDE bus latch (absent device 1 floats)";
         wr(X"DE31", X"A5");
-        wr(X"DE26", X"E0");
-        check(X"DE27", X"E0", "IDE bus low");
+        wr(X"DE26", X"F0");
+        check(X"DE27", X"F0", "IDE bus low");
         check(X"DE31", X"A5", "IDE bus high");
+
+
+        ------------------------------------------------------------------ ATA
+        report "--- ATA: drive 0 present (firmware model)";
+        wr(X"DE26", X"E0"); -- device 0, LBA
+        check(X"DE27", X"40", "status DRDY");
+        check(X"DE2E", X"40", "alternate status");
+        check(X"DE26", X"E0", "device/head");
+        check(X"DE2F", X"FE", "drive address dev 0 head 0");
+
+        report "--- ATA: IDENTIFY DEVICE";
+        wr(X"DE27", X"EC");
+        wait_status(X"48", "IDENTIFY DRQ");
+        read_sector(1000, "IDENTIFY");
+        check(X"DE27", X"40", "IDENTIFY done");
+
+        report "--- ATA: absent device 1 floats";
+        wr(X"DE26", X"F0");
+        check(X"DE22", X"F0", "dev 1 reg 2 = bus");
+        check(X"DE27", X"F0", "dev 1 status = bus");
+        wr(X"DE26", X"E0");
+        check(X"DE27", X"40", "dev 0 again");
+
+        report "--- ATA: READ SECTORS x2";
+        wr(X"DE22", X"02");
+        wr(X"DE23", X"05");
+        wr(X"DE24", X"00");
+        wr(X"DE25", X"00");
+        wr(X"DE27", X"20");
+        wait_status(X"48", "READ DRQ 1");
+        read_sector(5, "READ lba 5");
+        check(X"DE27", X"C0", "BSY between sectors");
+        check(X"DE22", X"C0", "reg 2 reads status while BSY");
+        wr(X"DE23", X"77"); -- ignored while BSY
+        wait_status(X"48", "READ DRQ 2");
+        read_sector(6, "READ lba 6");
+        check(X"DE27", X"40", "READ done");
+        check(X"DE23", X"05", "task file write ignored while BSY");
+
+        report "--- ATA: WRITE SECTORS";
+        wr(X"DE22", X"01");
+        wr(X"DE27", X"30");
+        wait_status(X"48", "WRITE DRQ");
+        for i in 0 to 255 loop
+            wr(X"DE31", sec_byte(77, 2 * i + 1));
+            wr(X"DE20", sec_byte(77, 2 * i));
+        end loop;
+        wait_status(X"40", "WRITE done");
+        if fw_writes /= 1 then
+            report "FAIL WRITE: firmware received " & integer'image(fw_writes) & " sectors" severity error;
+            v_err := v_err + 1;
+        else
+            v_n := 0;
+            for i in 0 to 511 loop
+                if wbuf(i) /= sec_byte(77, i) then
+                    if v_n < 4 then
+                        report "FAIL WRITE: byte " & integer'image(i) & " = $" & hex(wbuf(i)) &
+                               ", expected $" & hex(sec_byte(77, i)) severity error;
+                    end if;
+                    v_n := v_n + 1;
+                end if;
+            end loop;
+            if v_n /= 0 then
+                report "FAIL WRITE: " & integer'image(v_n) & " bytes differ" severity error;
+                v_err := v_err + 1;
+            else
+                report "ok   WRITE: 512 bytes received";
+            end if;
+        end if;
+
+        report "--- ATA: unknown command aborts";
+        wr(X"DE27", X"E5");
+        wait_status(X"41", "abort status");
+        check(X"DE21", X"04", "error ABRT");
+
+        report "--- ATA: SRST in the middle of a command";
+        fw_slow <= true;
+        wr(X"DE22", X"01");
+        wr(X"DE23", X"09");
+        wr(X"DE27", X"20");
+        check(X"DE27", X"C1", "BSY after command");
+        wr(X"DE2E", X"04");
+        wr(X"DE2E", X"00");
+        check(X"DE21", X"01", "signature error");
+        check(X"DE22", X"01", "signature nsect");
+        check(X"DE23", X"01", "signature sector");
+        check(X"DE24", X"00", "signature lcyl");
+        check(X"DE25", X"00", "signature hcyl");
+        check(X"DE27", X"40", "status after SRST");
+        wait for 60 us; -- the late completion of the old command must be dropped
+        check(X"DE27", X"40", "status after late completion");
+        check(X"DE22", X"01", "nsect after late completion");
+        fw_slow <= false;
+
+        report "--- ATA: interface 1 has no device";
+        wr(X"DE29", X"00");
+        check(X"DE27", X"00", "interface 1 status = bus");
+        wr(X"DE28", X"00");
+        check(X"DE27", X"40", "interface 0 again");
+
+        report "--- ATA: IDENTIFY after SRST";
+        wr(X"DE27", X"EC");
+        wait_status(X"48", "IDENTIFY DRQ");
+        read_sector(1000, "IDENTIFY again");
 
         report "--- 16K mode";
         wr(X"DEFC", X"00");

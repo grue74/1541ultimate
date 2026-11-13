@@ -2,7 +2,8 @@
 -- Package: ide64_ata_pkg
 --
 -- Description: CPU-side register map of the IDE64 ATA device (ide64_ata).
---              Byte offsets within its I/O window. Offsets $200-$3FF are the
+--              Byte offsets within its I/O window. Offsets $100-$13F are the
+--              DS1302 register file, offsets $200-$3FF are the
 --              512-byte sector buffer (byte n = byte n of the sector; the C64
 --              sees the word at 2k as low byte 2k, high byte 2k+1).
 --              Keep in sync with software/io/c64/ide64.h.
@@ -42,11 +43,16 @@ package ide64_ata_pkg is
     constant c_ide_ev_cmd   : natural := 0; -- the C64 wrote a command (BSY is set)
     constant c_ide_ev_buf   : natural := 1; -- buffer drained (data-in, busy-at-end) or filled (data-out); BSY is set
     constant c_ide_ev_reset : natural := 2; -- SRST (device control bit 2, 1 -> 0) or C64 reset
+    constant c_ide_ev_rtc_time : natural := 3; -- the C64 wrote a DS1302 clock register (0-6)
+    constant c_ide_ev_rtc_ram  : natural := 4; -- the C64 wrote DS1302 RAM
 
     -- R/W: bits 3..0: device present (bit = interface * 2 + device). bit 7: IRQ enable.
     constant c_ide_present  : unsigned(3 downto 0) := X"B";
     constant c_ide_devctl   : unsigned(3 downto 0) := X"C"; -- R: device control (reg 14)
     constant c_ide_iface    : unsigned(3 downto 0) := X"D"; -- R: bit 0 = interface, bit 7 = IDE64 cart active
     constant c_ide_pointer  : unsigned(3 downto 0) := X"E"; -- R: word pointer (debug)
+
+    -- Offsets $100-$13F: DS1302 register file (ide64_rtc). 0-7 clock, 8 trickle charge,
+    -- 32-63 RAM. The CPU keeps the clock registers current.
 
 end package;

@@ -247,6 +247,8 @@ architecture structural of slot_server_v4 is
     signal serve_io2       : std_logic := '0'; -- IO2n
     signal serve_ultimax   : std_logic := '0'; -- IDE64: ultimax 1000-7FFF / A000-BFFF
     signal ide64_active    : std_logic := '0'; -- IDE64: the ATA device owns DE20-DE2F/DE31
+    signal ide64_rtc_ce    : std_logic := '0';
+    signal ide64_killed    : std_logic := '0';
     signal allow_write     : std_logic := '0';
 
     -- timing measurement
@@ -808,6 +810,8 @@ begin
         serve_io2       => serve_io2, -- IO2n
         serve_ultimax   => serve_ultimax,
         ide64_active    => ide64_active,
+        ide64_rtc_ce    => ide64_rtc_ce,
+        ide64_killed    => ide64_killed,
         allow_write     => allow_write,
         kernal_area     => kernal_area,
         kernal_enable   => control.kernal_enable,
@@ -1061,6 +1065,8 @@ begin
             reset     => reset,
             c64_reset => actual_c64_reset,
             active    => ide64_active,
+            rtc_ce    => ide64_rtc_ce,
+            killed    => ide64_killed,
             slot_req  => slot_req,
             slot_resp => slot_resp_ide64,
             io_req    => io_req_ide64,

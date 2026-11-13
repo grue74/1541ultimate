@@ -128,6 +128,9 @@
         <Source name="../../../fpga/cart_slot/vhdl_source/ide64_ata.vhd" type="VHDL" type_short="VHDL">
             <Options/>
         </Source>
+        <Source name="../../../fpga/cart_slot/vhdl_source/ide64_rtc.vhd" type="VHDL" type_short="VHDL">
+            <Options/>
+        </Source>
         <Source name="../../../fpga/cart_slot/vhdl_source/cart_slot_pkg.vhd" type="VHDL" type_short="VHDL">
             <Options/>
         </Source>

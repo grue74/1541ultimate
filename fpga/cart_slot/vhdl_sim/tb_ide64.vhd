@@ -78,6 +78,12 @@ architecture tb of tb_ide64 is
     signal game_n           : std_logic;
     signal exrom_n          : std_logic;
     signal ide64_active     : std_logic;
+    signal ide64_rtc_ce     : std_logic;
+    signal ide64_killed     : std_logic;
+    signal fw_rtc_time      : natural := 0;     -- DS1302 clock write events seen by the firmware model
+    signal fw_rtc_ram       : natural := 0;     -- DS1302 RAM write events seen by the firmware model
+    signal fw_ram0          : std_logic_vector(7 downto 0) := X"00"; -- RAM byte 0, read on the last RAM event
+    signal fw_sec           : std_logic_vector(7 downto 0) := X"00"; -- seconds register, read on the last clock event
 
     -- ATA device, CPU side
     signal io_req           : t_io_req := c_io_req_init;
@@ -286,6 +292,8 @@ begin
         serve_io2       => serve_io2,
         serve_ultimax   => serve_ultimax,
         ide64_active    => ide64_active,
+        ide64_rtc_ce    => ide64_rtc_ce,
+        ide64_killed    => ide64_killed,
         allow_write     => allow_write,
         mem_req         => mem_req,
         mem_addr        => mem_addr,
@@ -302,6 +310,8 @@ begin
         reset           => reset,
         c64_reset       => c64_reset,
         active          => ide64_active,
+        rtc_ce          => ide64_rtc_ce,
+        killed          => ide64_killed,
         slot_req        => slot_req,
         slot_resp       => slot_resp_ide,
         io_req          => io_req,
@@ -373,9 +383,24 @@ begin
         wait until reset = '0';
         wait for 100 ns;
         io_wr(to_integer(c_ide_present), X"81"); -- interface 0 master, IRQ on
+        io_wr(16#100#, X"45"); -- DS1302 clock: 12:30:45
+        io_wr(16#101#, X"30");
+        io_wr(16#102#, X"12");
         loop
             wait_event(v_ev);
-            if v_ev(c_ide_ev_reset) = '1' then
+            if v_ev(c_ide_ev_rtc_time) = '1' or v_ev(c_ide_ev_rtc_ram) = '1' then
+                io_wr(to_integer(c_ide_events), v_ev and X"18");
+                if v_ev(c_ide_ev_rtc_time) = '1' then
+                    io_rd(16#100#, v_d);
+                    fw_sec <= v_d;
+                    fw_rtc_time <= fw_rtc_time + 1;
+                end if;
+                if v_ev(c_ide_ev_rtc_ram) = '1' then
+                    io_rd(16#120#, v_d);
+                    fw_ram0 <= v_d;
+                    fw_rtc_ram <= fw_rtc_ram + 1;
+                end if;
+            elsif v_ev(c_ide_ev_reset) = '1' then
                 io_wr(to_integer(c_ide_events), X"04");
                 fw_resets <= fw_resets + 1;
             elsif v_ev(c_ide_ev_cmd) = '1' then
@@ -625,7 +650,59 @@ begin
         end procedure;
 
         variable v_n : natural;
+        variable v_b : std_logic_vector(7 downto 0);
         constant c_b3 : natural := 3 * 16384;
+
+        -- DS1302: shift a byte in (LSB first), one $DE5F write per bit
+        procedure rtc_out(v : std_logic_vector(7 downto 0)) is
+        begin
+            for i in 0 to 7 loop
+                wr(X"DE5F", "0000000" & v(i));
+            end loop;
+        end procedure;
+
+        -- DS1302: shift a byte out, one $DE5F read per bit
+        procedure rtc_in(v : out std_logic_vector(7 downto 0)) is
+            variable d : std_logic_vector(7 downto 0);
+        begin
+            for i in 0 to 7 loop
+                rd_reg(X"DE5F", d);
+                v(i) := d(0);
+            end loop;
+        end procedure;
+
+        procedure rtc_check(cmd, exp : std_logic_vector(7 downto 0); msg : string) is
+            variable v : std_logic_vector(7 downto 0);
+        begin
+            wr(X"DEFB", X"02"); -- CE high
+            rtc_out(cmd);
+            rtc_in(v);
+            wr(X"DEFB", X"00"); -- CE low
+            if v /= exp then
+                report "FAIL " & msg & ": $" & hex(v) & ", expected $" & hex(exp) severity error;
+                v_err := v_err + 1;
+            else
+                report "ok   " & msg & ": $" & hex(v);
+            end if;
+        end procedure;
+
+        procedure rtc_write(cmd, v : std_logic_vector(7 downto 0)) is
+        begin
+            wr(X"DEFB", X"02");
+            rtc_out(cmd);
+            rtc_out(v);
+            wr(X"DEFB", X"00");
+        end procedure;
+
+        procedure check_count(actual, exp : natural; msg : string) is
+        begin
+            if actual /= exp then
+                report "FAIL " & msg & ": " & integer'image(actual) & ", expected " & integer'image(exp) severity error;
+                v_err := v_err + 1;
+            else
+                report "ok   " & msg & ": " & integer'image(actual);
+            end if;
+        end procedure;
     begin
         reset <= '1';
         wait for 200 ns;
@@ -766,6 +843,55 @@ begin
         wr(X"DE27", X"EC");
         wait_status(X"48", "IDENTIFY DRQ");
         read_sector(1000, "IDENTIFY again");
+
+        report "--- DS1302";
+        rtc_check(X"81", X"45", "read seconds");
+        rtc_check(X"85", X"12", "read hours");
+        rtc_write(X"C0", X"A5"); -- RAM 0
+        wait for 2 us;
+        check_count(fw_rtc_ram, 1, "RAM write events");
+        if fw_ram0 /= X"A5" then
+            report "FAIL RAM 0 seen by the CPU: $" & hex(fw_ram0) severity error;
+            v_err := v_err + 1;
+        end if;
+        rtc_check(X"C1", X"A5", "read RAM 0");
+        rtc_write(X"C2", X"5A"); -- RAM 1
+        -- burst RAM read: the first two bytes
+        wr(X"DEFB", X"02");
+        rtc_out(X"FF");
+        rtc_in(v_b);
+        if v_b /= X"A5" then
+            report "FAIL burst RAM byte 0: $" & hex(v_b) severity error;
+            v_err := v_err + 1;
+        end if;
+        rtc_in(v_b);
+        if v_b /= X"5A" then
+            report "FAIL burst RAM byte 1: $" & hex(v_b) severity error;
+            v_err := v_err + 1;
+        else
+            report "ok   burst RAM read";
+        end if;
+        wr(X"DEFB", X"00");
+        -- CE dropped in the middle of a command byte restarts the protocol
+        wr(X"DEFB", X"02");
+        rtc_out(X"0F"); -- only 4 bits matter: 1111...
+        wr(X"DEFB", X"00");
+        rtc_check(X"83", X"30", "read minutes after CE abort");
+        -- write protect blocks clock writes
+        rtc_write(X"8E", X"80");
+        rtc_write(X"80", X"00");
+        wait for 2 us;
+        check_count(fw_rtc_time, 0, "clock events while write protected");
+        rtc_check(X"81", X"45", "seconds unchanged while write protected");
+        rtc_write(X"8E", X"00");
+        rtc_write(X"80", X"17");
+        wait for 2 us;
+        check_count(fw_rtc_time, 1, "clock events");
+        if fw_sec /= X"17" then
+            report "FAIL seconds seen by the CPU: $" & hex(fw_sec) severity error;
+            v_err := v_err + 1;
+        end if;
+        rtc_check(X"81", X"17", "read seconds after write");
 
         report "--- 16K mode";
         wr(X"DEFC", X"00");

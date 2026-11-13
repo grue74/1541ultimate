@@ -37,6 +37,8 @@ port (
     reset           : in  std_logic;
     c64_reset       : in  std_logic := '0';
     active          : in  std_logic; -- the IDE64 cartridge is selected and enabled
+    rtc_ce          : in  std_logic := '0'; -- DS1302 CE ($DEFB bit 1)
+    killed          : in  std_logic := '0'; -- $DEFB bit 0: the RTC no longer responds
 
     -- C64 side
     slot_req        : in  t_slot_req;
@@ -80,6 +82,18 @@ architecture gideon of ide64_ata is
     signal ev_cmd       : std_logic := '0';
     signal ev_buf       : std_logic := '0';
     signal ev_reset     : std_logic := '0';
+    signal ev_rtc_time  : std_logic := '0';
+    signal ev_rtc_ram   : std_logic := '0';
+
+    -- DS1302
+    signal rtc_active   : std_logic;
+    signal rtc_strobe   : std_logic;
+    signal rtc_rbit     : std_logic;
+    signal rtc_cpu_en   : std_logic;
+    signal rtc_rdata    : std_logic_vector(7 downto 0);
+    signal rtc_wr_time  : std_logic;
+    signal rtc_wr_ram   : std_logic;
+    signal rtc_ack      : std_logic := '0';
     signal c64_reset_d  : std_logic := '0';
 
     -- derived
@@ -159,7 +173,7 @@ begin
         end if;
     end process;
 
-    process(slot_req, active, reg_rdata, in_hi)
+    process(slot_req, active, reg_rdata, in_hi, rtc_active, rtc_rbit)
     begin
         slot_resp <= c_slot_resp_init;
         if active='1' then
@@ -171,7 +185,33 @@ begin
                 slot_resp.reg_output <= '1';
             end if;
         end if;
+        if rtc_active='1' and slot_req.bus_address(8 downto 0) = "001011111" then -- DE5F: DS1302 data in bit 0
+            slot_resp.data <= "0000000" & rtc_rbit;
+            slot_resp.reg_output <= '1';
+        end if;
     end process;
+
+    -- DS1302 at DE5F. Every access is one SCLK pulse; it stops responding when the cart is killed.
+    rtc_active <= active and not killed;
+    rtc_strobe <= rtc_active and (slot_req.io_read or slot_req.io_write) when slot_req.io_address(8 downto 0) = "001011111" else '0';
+    rtc_cpu_en <= (io_req.read or io_req.write) when io_req.address(9 downto 8) = "01" else '0';
+
+    i_rtc: entity work.ide64_rtc
+    port map (
+        clock           => clock,
+        reset           => reset,
+        ce              => rtc_ce,
+        access_strobe   => rtc_strobe,
+        access_write    => slot_req.io_write,
+        access_wbit     => slot_req.data(0),
+        rbit            => rtc_rbit,
+        cpu_en          => rtc_cpu_en,
+        cpu_we          => io_req.write,
+        cpu_addr        => io_req.address(5 downto 0),
+        cpu_wdata       => io_req.data,
+        cpu_rdata       => rtc_rdata,
+        ev_time         => rtc_wr_time,
+        ev_ram          => rtc_wr_ram );
 
     c64_rd_reg <= active and slot_req.io_read  when slot_req.io_address(8 downto 4) = "00010" else '0';
     c64_wr_reg <= active and slot_req.io_write when slot_req.io_address(8 downto 4) = "00010" else '0';
@@ -180,7 +220,7 @@ begin
     data_rd <= c64_rd_reg and sel_present and xfer and not dir_out and not bsy_eff when slot_req.io_address(3 downto 0) = X"0" else '0';
     data_wr <= c64_wr_reg and sel_present and xfer and dir_out and not bsy_eff when slot_req.io_address(3 downto 0) = X"0" else '0';
 
-    io_irq <= irq_en and (ev_cmd or ev_buf or ev_reset);
+    io_irq <= irq_en and (ev_cmd or ev_buf or ev_reset or ev_rtc_time or ev_rtc_ram);
 
     process(clock)
         variable v_reg  : natural range 0 to 15;
@@ -269,7 +309,14 @@ begin
             -- CPU side
             ---------------------------------------------------------------
             regs_resp <= c_io_resp_init;
-            if io_req.address(9)='0' then
+            if rtc_wr_time='1' then
+                ev_rtc_time <= '1';
+            end if;
+            if rtc_wr_ram='1' then
+                ev_rtc_ram <= '1';
+            end if;
+
+            if io_req.address(9 downto 8)="00" then
                 if io_req.write='1' then
                     regs_resp.ack <= '1';
                     if ev_reset='0' then -- completions are dropped until the reset is acknowledged
@@ -301,6 +348,12 @@ begin
                         if io_req.data(c_ide_ev_reset)='1' then
                             ev_reset <= '0';
                         end if;
+                        if io_req.data(c_ide_ev_rtc_time)='1' then
+                            ev_rtc_time <= '0';
+                        end if;
+                        if io_req.data(c_ide_ev_rtc_ram)='1' then
+                            ev_rtc_ram <= '0';
+                        end if;
                     when c_ide_present =>
                         present <= io_req.data(3 downto 0);
                         irq_en  <= io_req.data(7);
@@ -319,7 +372,7 @@ begin
                     when c_ide_command  => regs_resp.data <= command;
                     when c_ide_status   => regs_resp.data <= status;
                     when c_ide_control  => regs_resp.data <= bsy & "0000" & busy_at_end & dir_out & xfer;
-                    when c_ide_events   => regs_resp.data <= "00000" & ev_reset & ev_buf & ev_cmd;
+                    when c_ide_events   => regs_resp.data <= "000" & ev_rtc_ram & ev_rtc_time & ev_reset & ev_buf & ev_cmd;
                     when c_ide_present  => regs_resp.data <= irq_en & "000" & present;
                     when c_ide_devctl   => regs_resp.data <= devctl;
                     when c_ide_iface    => regs_resp.data <= active & "000000" & iface;
@@ -379,6 +432,7 @@ begin
         if rising_edge(clock) then
             buf_ack <= (io_req.read or io_req.write) and io_req.address(9);
             buf_odd <= io_req.address(0);
+            rtc_ack <= rtc_cpu_en;
 
             wr_pend <= data_wr;
             if data_wr='1' then
@@ -392,8 +446,9 @@ begin
     -- Port B reads the word at the pointer, except for the clock that writes a C64 data word
     buf_b_addr <= wr_addr when wr_pend='1' else ptr;
 
-    io_resp.ack  <= regs_resp.ack or buf_ack;
-    io_resp.data <= regs_resp.data when buf_ack='0' else
+    io_resp.ack  <= regs_resp.ack or buf_ack or rtc_ack;
+    io_resp.data <= rtc_rdata when rtc_ack='1' else
+                    regs_resp.data when buf_ack='0' else
                     buf_a_hi when buf_odd='1' else
                     buf_a_lo;
 

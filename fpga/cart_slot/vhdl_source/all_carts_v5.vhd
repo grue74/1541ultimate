@@ -52,6 +52,8 @@ port (
     serve_io2       : out std_logic; -- IO2n
     serve_ultimax   : out std_logic := '0'; -- serve 1000-7FFF and A000-BFFF in ultimax (PHI2 only)
     ide64_active    : out std_logic := '0'; -- IDE64 selected and enabled: the ATA device (ide64_ata) owns DE20-DE2F/DE31
+    ide64_rtc_ce    : out std_logic := '0'; -- IDE64 DS1302 CE ($DEFB bit 1)
+    ide64_killed    : out std_logic := '0'; -- IDE64 $DEFB bit 0: ROM window and RTC off until reset
     allow_write     : out std_logic;
 
     mem_req         : in  std_logic; -- if '1', the address shouldn't change
@@ -164,6 +166,8 @@ begin
 
     serve_enable <= cart_en or kernal_enable;
     ide64_active <= cart_en when g_ide64 and cart_logic_d = c_ide64 else '0';
+    ide64_rtc_ce <= ide_ce;
+    ide64_killed <= ide_kill;
     cart_active  <= cart_en;
 
     slot_addr <= std_logic_vector(slot_req.bus_address);

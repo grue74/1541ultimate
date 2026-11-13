@@ -30,6 +30,7 @@ typedef struct {
     uint8_t pointer;  // E R: word pointer
 } ide64_regs_t;
 
+#define IDE64_RTC_OFFSET     0x100 // DS1302 register file: 0-7 clock, 8 trickle, 32-63 RAM
 #define IDE64_BUFFER_OFFSET  0x200
 
 #define IDE64_CTRL_ARM       0x01 // start a data phase (pointer = 0, DRQ)
@@ -39,6 +40,12 @@ typedef struct {
 #define IDE64_EV_CMD         0x01
 #define IDE64_EV_BUF         0x02
 #define IDE64_EV_RESET       0x04
+#define IDE64_EV_RTC_TIME    0x08 // the C64 wrote a DS1302 clock register
+#define IDE64_EV_RTC_RAM     0x10 // the C64 wrote DS1302 RAM
+#define IDE64_EV_RTC         (IDE64_EV_RTC_TIME | IDE64_EV_RTC_RAM)
+
+#define IDE64_RTC_RAM_SIZE   32
+#define IDE64_RTC_FLASH_FILE "/flash/ide64.rtc" // RTC RAM while no image is mounted
 
 #define IDE64_PRESENT_IRQ    0x80
 
@@ -80,6 +87,7 @@ class Ide64 : public ConfigurableObject
 {
     volatile ide64_regs_t *regs;
     volatile uint8_t *buffer;
+    volatile uint8_t *rtc_regs;
     TaskHandle_t taskHandle;
     SemaphoreHandle_t mutex;
     uint8_t present_mask;
@@ -88,6 +96,18 @@ class Ide64 : public ConfigurableObject
     Ide64Drive drive; // interface 0, master
 
     uint8_t sector_data[512];
+
+    // DS1302 RAM (the IDEDOS settings), saved next to the mounted image
+    uint8_t rtc_ram[IDE64_RTC_RAM_SIZE];
+    mstring rtc_file;
+    bool rtc_dirty;
+    TickType_t rtc_changed;
+
+    void handle_rtc_events(uint8_t ev);
+    void update_clock(void);
+    void set_clock_from_c64(void);
+    void rtc_load(const char *filename);
+    void rtc_save(void);
 
     static void task(void *a);
     static uint8_t irq(void *context);

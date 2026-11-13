@@ -14,6 +14,7 @@
 #include "itu.h"
 #include "filemanager.h"
 #include "init_function.h"
+#include "rtc.h"
 
 #define CFG_IDE64_IMAGE  0x01
 #define CFG_IDE64_MOUNT  0x02
@@ -135,6 +136,11 @@ Ide64 :: Ide64()
 {
     regs = (volatile ide64_regs_t *)IDE64_BASE;
     buffer = (volatile uint8_t *)(IDE64_BASE + IDE64_BUFFER_OFFSET);
+    rtc_regs = (volatile uint8_t *)(IDE64_BASE + IDE64_RTC_OFFSET);
+    memset(rtc_ram, 0, sizeof(rtc_ram));
+    rtc_file = IDE64_RTC_FLASH_FILE;
+    rtc_dirty = false;
+    rtc_changed = 0;
     taskHandle = NULL;
     present_mask = 0;
     abort_request = false;
@@ -147,7 +153,11 @@ Ide64 :: Ide64()
 void Ide64 :: init(void)
 {
     regs->present = 0;
-    regs->events = IDE64_EV_CMD | IDE64_EV_BUF | IDE64_EV_RESET;
+    regs->events = IDE64_EV_CMD | IDE64_EV_BUF | IDE64_EV_RESET | IDE64_EV_RTC;
+    for (int i = 0; i < 64; i++) {
+        rtc_regs[i] = 0;
+    }
+    rtc_load(IDE64_RTC_FLASH_FILE);
     install_high_irq(ITU_IRQHIGH_IDE64, Ide64 :: irq, this);
     xTaskCreate(Ide64 :: task, "IDE64", configMINIMAL_STACK_SIZE, this, PRIO_DRIVER, &taskHandle);
 }
@@ -187,9 +197,19 @@ void Ide64 :: run(void)
         }
 
         write_present();
-        ulTaskNotifyTake(pdTRUE, automount ? 1000 : portMAX_DELAY);
+        ulTaskNotifyTake(pdTRUE, configTICK_RATE_HZ / 2);
 
         uint8_t ev = regs->events;
+
+        // DS1302: clock, RAM changes, and saving the RAM 2 s after the last change (or on reset)
+        xSemaphoreTake(mutex, portMAX_DELAY);
+        handle_rtc_events(ev);
+        update_clock();
+        if (rtc_dirty && ((ev & IDE64_EV_RESET) || ((xTaskGetTickCount() - rtc_changed) > 2 * configTICK_RATE_HZ))) {
+            rtc_save();
+        }
+        xSemaphoreGive(mutex);
+
         if (ev & IDE64_EV_RESET) {
             regs->events = IDE64_EV_RESET;
             drive.reset_translation();
@@ -230,6 +250,7 @@ bool Ide64 :: wait_buffer(void)
             complete(ATA_ERR_ABRT);
             return false;
         }
+        handle_rtc_events(ev); // otherwise they would keep the IRQ asserted
         write_present();
         ulTaskNotifyTake(pdTRUE, 1000);
     }
@@ -619,6 +640,9 @@ FRESULT Ide64 :: mount(const char *path, const char *filename)
     const char *ext = strrchr(full.c_str(), '.');
     drive.cf = !(ext && (strcasecmp(ext, ".hdd") == 0));
     drive.detect_geometry();
+    mstring rtcname(full);
+    rtcname += ".rtc";
+    rtc_load(rtcname.c_str()); // the IDEDOS settings follow the image
     present_mask |= 0x01; // interface 0, master
     write_present();
     xSemaphoreGive(mutex);
@@ -626,6 +650,143 @@ FRESULT Ide64 :: mount(const char *path, const char *filename)
     printf("IDE64: mounted %s (%u sectors, CHS %u/%u/%u%s)\n", full.c_str(), drive.size,
            drive.cylinders, drive.heads, drive.sectors, readonly ? ", read only" : "");
     return FR_OK;
+}
+
+/*********************************************************************/
+/* DS1302                                                            */
+/*********************************************************************/
+static uint8_t to_bcd(int v)
+{
+    return (uint8_t)(((v / 10) << 4) | (v % 10));
+}
+
+static int from_bcd(uint8_t v)
+{
+    return (v >> 4) * 10 + (v & 0x0F);
+}
+
+void Ide64 :: handle_rtc_events(uint8_t ev)
+{
+    if (!(ev & IDE64_EV_RTC)) {
+        return;
+    }
+    regs->events = ev & IDE64_EV_RTC;
+    if (ev & IDE64_EV_RTC_TIME) {
+        set_clock_from_c64();
+    }
+    if (ev & IDE64_EV_RTC_RAM) {
+        for (int i = 0; i < IDE64_RTC_RAM_SIZE; i++) {
+            uint8_t b = rtc_regs[32 + i];
+            if (b != rtc_ram[i]) {
+                rtc_ram[i] = b;
+                rtc_dirty = true;
+            }
+        }
+        rtc_changed = xTaskGetTickCount();
+    }
+}
+
+// Copy the time of the Ultimate's RTC into the DS1302 clock registers
+void Ide64 :: update_clock(void)
+{
+    if (!(regs->iface & 0x80)) { // IDE64 cart not active
+        return;
+    }
+    if (rtc_regs[0] & 0x80) { // clock halted by the C64
+        return;
+    }
+    int y, M, D, wd, h, m, s;
+    rtc.get_time(y, M, D, wd, h, m, s);
+
+    uint8_t hours;
+    if (rtc_regs[2] & 0x80) { // 12 hour mode: bit 5 = PM
+        int h12 = (h % 12) ? (h % 12) : 12;
+        hours = 0x80 | ((h >= 12) ? 0x20 : 0) | to_bcd(h12);
+    } else {
+        hours = to_bcd(h);
+    }
+    rtc_regs[0] = to_bcd(s);
+    rtc_regs[1] = to_bcd(m);
+    rtc_regs[2] = hours;
+    rtc_regs[3] = to_bcd(D);
+    rtc_regs[4] = to_bcd(M);
+    rtc_regs[5] = (uint8_t)(wd + 1); // 1 = Sunday
+    rtc_regs[6] = to_bcd((1980 + y) % 100);
+}
+
+// The C64 set the clock: set the Ultimate's RTC to it
+void Ide64 :: set_clock_from_c64(void)
+{
+    uint8_t r[7];
+    for (int i = 0; i < 7; i++) {
+        r[i] = rtc_regs[i];
+    }
+    if (r[0] & 0x80) { // clock halted: keep the Ultimate's clock running
+        return;
+    }
+    int s = from_bcd(r[0] & 0x7F);
+    int m = from_bcd(r[1] & 0x7F);
+    int h;
+    if (r[2] & 0x80) {
+        h = from_bcd(r[2] & 0x1F) % 12 + ((r[2] & 0x20) ? 12 : 0);
+    } else {
+        h = from_bcd(r[2] & 0x3F);
+    }
+    int D = from_bcd(r[3] & 0x3F);
+    int M = from_bcd(r[4] & 0x1F);
+    int wd = ((r[5] & 0x07) + 6) % 7; // 1..7 -> 0..6
+    int y = 2000 + from_bcd(r[6]) - 1980;
+
+    if ((s > 59) || (m > 59) || (h > 23) || (D < 1) || (D > 31) || (M < 1) || (M > 12)) {
+        printf("IDE64: ignoring invalid clock %02x %02x %02x %02x %02x %02x %02x\n",
+               r[0], r[1], r[2], r[3], r[4], r[5], r[6]);
+        return;
+    }
+    rtc.set_time_in_chip(rtc.get_correction(), y, M, D, wd, h, m, s);
+}
+
+// Load the RTC RAM from a file. If it doesn't exist, the current contents stay.
+void Ide64 :: rtc_load(const char *filename)
+{
+    FileManager *fm = FileManager :: getFileManager();
+    File *f = NULL;
+    uint32_t transferred = 0;
+    uint8_t data[IDE64_RTC_RAM_SIZE];
+
+    if (rtc_dirty) {
+        rtc_save();
+    }
+    rtc_file = filename;
+    if (fm->fopen(filename, FA_READ, &f) != FR_OK) {
+        return;
+    }
+    f->read(data, IDE64_RTC_RAM_SIZE, &transferred);
+    fm->fclose(f);
+    if (transferred != IDE64_RTC_RAM_SIZE) {
+        return;
+    }
+    memcpy(rtc_ram, data, IDE64_RTC_RAM_SIZE);
+    for (int i = 0; i < IDE64_RTC_RAM_SIZE; i++) {
+        rtc_regs[32 + i] = rtc_ram[i];
+    }
+    printf("IDE64: RTC RAM loaded from %s\n", filename);
+}
+
+void Ide64 :: rtc_save(void)
+{
+    FileManager *fm = FileManager :: getFileManager();
+    File *f = NULL;
+    uint32_t transferred = 0;
+
+    rtc_dirty = false;
+    FRESULT fres = fm->fopen(rtc_file.c_str(), FA_WRITE | FA_CREATE_ALWAYS, &f);
+    if (fres != FR_OK) {
+        printf("IDE64: can't save RTC RAM to %s: %s\n", rtc_file.c_str(), FileSystem :: get_error_string(fres));
+        return;
+    }
+    f->write(rtc_ram, IDE64_RTC_RAM_SIZE, &transferred);
+    fm->fclose(f);
+    printf("IDE64: RTC RAM saved to %s\n", rtc_file.c_str());
 }
 
 void Ide64 :: set_startup_image(const char *fullpath)
@@ -646,6 +807,11 @@ void Ide64 :: unmount(void)
         drive.file = NULL;
         drive.name = "";
         printf("IDE64: unmounted\n");
+        // keep the current settings, from now on saved to flash
+        if (rtc_dirty) {
+            rtc_save();
+        }
+        rtc_file = IDE64_RTC_FLASH_FILE;
     }
     xSemaphoreGive(mutex);
 }
